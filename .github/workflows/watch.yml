@@ -1,0 +1,104 @@
+name: estate-watch
+on:
+  schedule:
+    - cron: "*/30 * * * *"        # every 30 min
+  workflow_dispatch:
+    inputs:
+      simulate_fail:
+        description: "Set to a bogus URL to force a probe failure (test the issue path)"
+        required: false
+        default: ""
+permissions:
+  issues: write
+concurrency:
+  group: estate-watch
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore flap state
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: estate-watch-state-${{ github.run_id }}
+          restore-keys: estate-watch-state-
+      - name: Probe estate
+        id: probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIMULATE_FAIL: ${{ github.event.inputs.simulate_fail }}
+        run: |
+          set -u
+          HEARTBEAT_RAW="https://gist.githubusercontent.com/bigbrownjeff/6f2873eb3b1936fea67efc4ae3546aea/raw/heartbeat.txt"
+          STALE_HOURS="2.5"
+          declare -a DOWN=()
+          # Public edge URLs. UP = any response 2xx/3xx/401/403 (challenge/gate = origin path reachable).
+          check_url () {  # $1 name  $2 url
+            code=$(curl -s -o /dev/null -w "%{http_code}" -m 20 "$2?cb=$RANDOM" || echo 000)
+            case "$code" in 2*|3*|401|403) echo "UP   $1 ($code)";; *) echo "DOWN $1 ($code)"; DOWN+=("$1:$code");; esac
+          }
+          if [ -n "${SIMULATE_FAIL:-}" ]; then check_url "SIMULATED" "$SIMULATE_FAIL"; fi
+          check_url "jeffpinto.com"        "https://jeffpinto.com/"
+          check_url "prevalence-audit"     "https://prevalence-audit.jeffpinto.com/"
+          check_url "rvc-taxes"            "https://rvc-taxes.jeffpinto.com/"
+          check_url "crm.bluecamel"        "https://crm.bluecamelconsulting.com/"
+          check_url "limina-demo"          "https://limina-demo.bluecamelconsulting.com/"
+          # Laptop heartbeat (dead-man's-switch): gist timestamp fresh?
+          hb=$(curl -s -m 20 "$HEARTBEAT_RAW" | head -1 | tr -d '[:space:]')
+          if [ -z "$hb" ]; then
+            echo "DOWN laptop-heartbeat (unreachable)"; DOWN+=("laptop-heartbeat:unreachable")
+          else
+            age_h=$(python3 - "$hb" <<'PY'
+import sys,datetime
+try:
+    t=datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00"))
+    print((datetime.datetime.now(datetime.timezone.utc)-t).total_seconds()/3600)
+except Exception: print(999)
+PY
+)
+            stale=$(python3 -c "print(1 if float('$age_h')>float('$STALE_HOURS') else 0)")
+            if [ "$stale" = "1" ]; then echo "DOWN laptop-heartbeat (stale ${age_h}h)"; DOWN+=("laptop-heartbeat:stale"); else echo "UP   laptop-heartbeat (${age_h}h)"; fi
+          fi
+          {
+            echo "failing=$([ ${#DOWN[@]} -gt 0 ] && echo true || echo false)"
+            echo "down_csv=$(IFS=,; echo "${DOWN[*]:-}")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Update flap counter + alert
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILING: ${{ steps.probe.outputs.failing }}
+          DOWN_CSV: ${{ steps.probe.outputs.down_csv }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          mkdir -p .state
+          consec=$(cat .state/consec_fail 2>/dev/null || echo 0)
+          issue=$(gh issue list --repo "$REPO" --label estate-incident --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ "$FAILING" = "true" ]; then
+            consec=$((consec+1)); echo "$consec" > .state/consec_fail
+            if [ "$consec" -ge 2 ]; then
+              body="Estate-watch saw **$DOWN_CSV** down on 2+ consecutive probes (~$(date -u +%FT%TZ)). Public surfaces staying up while laptop-heartbeat is stale = laptop dark."
+              if [ -n "$issue" ]; then
+                gh issue comment "$issue" --repo "$REPO" --body "Still down ($DOWN_CSV) at $(date -u +%FT%TZ)."
+              else
+                gh issue create --repo "$REPO" --label estate-incident --title "Estate watch: surface(s) down ($DOWN_CSV)" --body "$body"
+              fi
+            else
+              echo "flap #1 ($DOWN_CSV) — holding one cycle before alerting."
+            fi
+          else
+            # green: zero content writes (issues/comments) in steady state
+            echo 0 > .state/consec_fail
+            if [ -n "$issue" ]; then
+              gh issue comment "$issue" --repo "$REPO" --body "Recovered — all probes green at $(date -u +%FT%TZ)."
+              gh issue close "$issue" --repo "$REPO"
+            fi
+          fi
+      - name: Save flap state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: estate-watch-state-${{ github.run_id }}
