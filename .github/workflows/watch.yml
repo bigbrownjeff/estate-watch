@@ -50,14 +50,7 @@ jobs:
           if [ -z "$hb" ]; then
             echo "DOWN laptop-heartbeat (unreachable)"; DOWN+=("laptop-heartbeat:unreachable")
           else
-            age_h=$(python3 - "$hb" <<'PY'
-import sys,datetime
-try:
-    t=datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00"))
-    print((datetime.datetime.now(datetime.timezone.utc)-t).total_seconds()/3600)
-except Exception: print(999)
-PY
-)
+            age_h=$(python3 -c "import sys,datetime;t=datetime.datetime.fromisoformat(sys.argv[1].replace('Z','+00:00'));print((datetime.datetime.now(datetime.timezone.utc)-t).total_seconds()/3600)" "$hb" 2>/dev/null || echo 999)
             stale=$(python3 -c "print(1 if float('$age_h')>float('$STALE_HOURS') else 0)")
             if [ "$stale" = "1" ]; then echo "DOWN laptop-heartbeat (stale ${age_h}h)"; DOWN+=("laptop-heartbeat:stale"); else echo "UP   laptop-heartbeat (${age_h}h)"; fi
           fi
@@ -102,4 +95,3 @@ PY
         with:
           path: .state
           key: estate-watch-state-${{ github.run_id }}
-# re-parse nudge: workflow_dispatch not indexed on initial push
