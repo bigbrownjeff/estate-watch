@@ -45,6 +45,12 @@ jobs:
           check_url "rvc-taxes"            "https://rvc-taxes.jeffpinto.com/"
           check_url "crm.bluecamel"        "https://crm.bluecamelconsulting.com/"
           check_url "limina-demo"          "https://limina-demo.bluecamelconsulting.com/"
+          # Tunnel-backed surfaces: origin is the laptop, so cloudflared dying takes these
+          # down while the edge sites stay green. Lantern is the one with real users.
+          check_url "tunnel:lantern-watch" "https://watch.lantern.family/"
+          check_url "tunnel:atlas"         "https://atlas.lantern.family/"
+          check_url "tunnel:notes"         "https://notes.jeffpinto.com/"
+          check_url "tunnel:bluecamel"     "https://bluecamelconsulting.com/"
           # Laptop heartbeat (dead-man's-switch): gist timestamp fresh?
           hb=$(curl -s -m 20 "$HEARTBEAT_RAW" | head -1 | tr -d '[:space:]')
           if [ -z "$hb" ]; then
@@ -72,7 +78,21 @@ jobs:
           if [ "$FAILING" = "true" ]; then
             consec=$((consec+1)); echo "$consec" > .state/consec_fail
             if [ "$consec" -ge 2 ]; then
-              body="Estate-watch saw **$DOWN_CSV** down on 2+ consecutive probes (~$(date -u +%FT%TZ)). Public surfaces staying up while laptop-heartbeat is stale = laptop dark."
+              # Name the failure shape so the incident says what to go fix.
+              tunnels=$(printf '%s' "$DOWN_CSV" | tr ',' '\n' | grep -c '^tunnel:' || true)
+              others=$(printf '%s' "$DOWN_CSV" | tr ',' '\n' | grep -vc '^tunnel:' || true)
+              if printf '%s' "$DOWN_CSV" | grep -q 'laptop-heartbeat'; then
+                diag="**Laptop is dark or offline.** Local launchd jobs are not running and every tunnel-backed surface goes down with it. Edge sites (Pages) are unaffected. Check network, then \`launchctl list | grep jeffpinto\`."
+              elif [ "$tunnels" -gt 0 ] && [ "$others" -eq 0 ]; then
+                diag="**Tunnel failure with the laptop alive** (heartbeat is fresh). cloudflared died but launchd jobs are fine — kickstart the affected \`com.jeffpinto.*-tunnel\` job(s)."
+              elif [ "$tunnels" -gt 0 ]; then
+                diag="Mixed edge + tunnel failure — check Cloudflare status before touching the laptop."
+              else
+                diag="Edge surface down while the laptop is healthy — suspect a Cloudflare Pages deploy, DNS, or the project itself."
+              fi
+              body="Estate-watch saw **$DOWN_CSV** down on 2+ consecutive probes (~$(date -u +%FT%TZ)).
+
+$diag"
               if [ -n "$issue" ]; then
                 gh issue comment "$issue" --repo "$REPO" --body "Still down ($DOWN_CSV) at $(date -u +%FT%TZ)."
               else
