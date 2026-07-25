@@ -90,9 +90,10 @@ jobs:
               else
                 diag="Edge surface down while the laptop is healthy — suspect a Cloudflare Pages deploy, DNS, or the project itself."
               fi
-              body="Estate-watch saw **$DOWN_CSV** down on 2+ consecutive probes (~$(date -u +%FT%TZ)).
-
-$diag"
+              # NOTE: keep every line of this run: block indented. A column-0 line ends the
+              # YAML block scalar and silently drops workflow_dispatch (cost an hour on 07-24),
+              # so build multi-line strings with printf, never a literal newline in a quote.
+              body=$(printf 'Estate-watch saw **%s** down on 2+ consecutive probes (~%s).\n\n%s\n' "$DOWN_CSV" "$(date -u +%FT%TZ)" "$diag")
               if [ -n "$issue" ]; then
                 gh issue comment "$issue" --repo "$REPO" --body "Still down ($DOWN_CSV) at $(date -u +%FT%TZ)."
               else
