@@ -44,7 +44,6 @@ jobs:
           check_url "prevalence-audit"     "https://prevalence-audit.jeffpinto.com/"
           check_url "rvc-taxes"            "https://rvc-taxes.jeffpinto.com/"
           check_url "crm.bluecamel"        "https://crm.bluecamelconsulting.com/"
-          check_url "limina-demo"          "https://limina-demo.bluecamelconsulting.com/"
           # Tunnel-backed surfaces: origin is the laptop, so cloudflared dying takes these
           # down while the edge sites stay green. Lantern is the one with real users.
           check_url "tunnel:lantern-watch" "https://watch.lantern.family/"
