@@ -398,6 +398,11 @@ def check_skill_provenance(check: dict[str, Any]) -> dict[str, Any]:
                 actual = tree_digest(str(target))
                 if actual != entry["sha256"]:
                     findings.append(f"{name}: sha256={actual[:12]} expected={entry['sha256'][:12]}")
+        elif mode == "installed_only":
+            # Authored directly under install_root with no canonical repo source.
+            # Existence is the only invariant; there is nothing to diff against.
+            if not target.is_dir():
+                findings.append(f"{name}: install tree missing")
         else:
             findings.append(f"{name}: unknown provenance mode {mode}")
     if findings:
