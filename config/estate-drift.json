@@ -1,0 +1,450 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "id": "career-canonical-root",
+      "type": "path_exists",
+      "path": "${PROJECTS}/career/applications/mercury-ds-manager/_SOURCES.md",
+      "kind": "file"
+    },
+    {
+      "id": "tailor-cv-install",
+      "type": "same_file",
+      "source": "${PROJECTS}/career/.claude/skills/tailor-cv/SKILL.md",
+      "target": "${HOME}/.claude/skills/tailor-cv/SKILL.md"
+    },
+    {
+      "id": "tailor-cv-old-root",
+      "type": "text_absent",
+      "paths": ["${HOME}/.claude/skills/tailor-cv/SKILL.md"],
+      "patterns": ["/Projects/jeffpinto-site/applications"]
+    },
+    {
+      "id": "client-workup-install",
+      "type": "same_file",
+      "source": "${PROJECTS}/client-pitches/.claude/skills/client-workup/SKILL.md",
+      "target": "${HOME}/.claude/skills/client-workup/SKILL.md"
+    },
+    {
+      "id": "client-workup-old-root",
+      "type": "text_absent",
+      "paths": [
+        "${HOME}/.claude/skills/client-workup/**/*.md",
+        "${PROJECTS}/client-pitches/.claude/skills/client-workup/**/*.md",
+        "${PROJECTS}/outbound_with_jeff_and_marv/.claude/skills/client-workup/**/*.md"
+      ],
+      "patterns": ["jeffpinto-site/pitches"]
+    },
+    {
+      "id": "persona-author-install",
+      "type": "same_file",
+      "source": "${PROJECTS}/personas/.claude/skills/persona-author/SKILL.md",
+      "target": "${HOME}/.claude/skills/persona-author/SKILL.md"
+    },
+    {
+      "id": "crm-old-workup-root",
+      "type": "text_absent",
+      "paths": [
+        "${PROJECTS}/outbound_with_jeff_and_marv/.env",
+        "${PROJECTS}/outbound_with_jeff_and_marv/.env.example",
+        "${PROJECTS}/outbound_with_jeff_and_marv/crm/**/*.py"
+      ],
+      "patterns": ["jeffpinto-site/pitches"]
+    },
+    {
+      "id": "client-workup-versioned-authority",
+      "type": "git_tracked",
+      "repo": "${PROJECTS}/client-pitches",
+      "paths": [
+        "README.md",
+        ".claude/skills/client-workup/SKILL.md",
+        "scripts/install-client-workup.sh",
+        "scripts/sync_artifact_index.py"
+      ]
+    },
+    {
+      "id": "crm-private-artifact-config",
+      "type": "text_contract",
+      "paths": [
+        "${PROJECTS}/outbound_with_jeff_and_marv/.env",
+        "${PROJECTS}/outbound_with_jeff_and_marv/.env.example"
+      ],
+      "required": ["^CRM_WORKUPS_DIR=~/Projects/client-pitches/pitches$"]
+    },
+    {
+      "id": "crm-private-artifact-code",
+      "type": "text_contract",
+      "paths": ["${PROJECTS}/outbound_with_jeff_and_marv/crm/workup_artifacts.py"],
+      "required": [
+        "client-pitches",
+        "client-pitches-artifacts\\.v1",
+        "WORKUP_INDEX_PATH",
+        "artifact_control",
+        "approved_digest"
+      ],
+      "forbidden": ["jeffpinto-site/pitches"]
+    },
+    {
+      "id": "crm-noncanonical-workups-ignored",
+      "type": "text_contract",
+      "paths": ["${PROJECTS}/outbound_with_jeff_and_marv/.gitignore"],
+      "required": [
+        "^/workups/$",
+        "^/\\.claude/skills/client-workup/$"
+      ]
+    },
+    {
+      "id": "crm-launcher-install",
+      "type": "same_file",
+      "source": "${PROJECTS}/outbound_with_jeff_and_marv/local-tools/outbound-crm-serve.sh",
+      "target": "${HOME}/.local/bin/outbound-crm-serve.sh"
+    },
+    {
+      "id": "crm-runtime-approval",
+      "type": "runtime_receipt",
+      "root": "${PROJECTS}/outbound_with_jeff_and_marv",
+      "receipt": "${HOME}/.local/share/outbound-crm/approved-runtime.receipt",
+      "schema": "outbound-crm-runtime-approval.v1",
+      "branch": "main",
+      "source_launcher": "${PROJECTS}/outbound_with_jeff_and_marv/local-tools/outbound-crm-serve.sh",
+      "installed_launcher": "${HOME}/.local/bin/outbound-crm-serve.sh",
+      "python": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+      "test_command": "PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -v",
+      "dirs": ["crm", "config", "manifestos", "references", "templates"],
+      "files": [
+        ".env",
+        "local-tools/outbound-crm-serve.sh",
+        "scripts/runtime_fingerprint.py"
+      ]
+    },
+    {
+      "id": "crm-runtime-approval-contract",
+      "type": "text_contract",
+      "paths": ["${PROJECTS}/outbound_with_jeff_and_marv/local-tools/outbound-crm-serve.sh"],
+      "required": [
+        "approved-runtime\\.receipt",
+        "outbound-crm-runtime-approval\\.v1",
+        "runtime_sha256",
+        "launcher_sha256",
+        "checkout is dirty; refusing startup",
+        "runtime_fingerprint\\.py",
+        "authentication is not configured; refusing startup"
+      ]
+    },
+    {
+      "id": "crm-importer-install",
+      "type": "same_file",
+      "source": "${PROJECTS}/outbound_with_jeff_and_marv/local-tools/sweep-crm-import.py",
+      "target": "${HOME}/.local/bin/sweep-crm-import.py"
+    },
+    {
+      "id": "crm-runtime-routing",
+      "type": "text_contract",
+      "paths": [
+        "${HOME}/.local/bin/outbound-crm-serve.sh",
+        "${HOME}/.local/bin/sweep-crm-import.py"
+      ],
+      "required": [
+        "/Users/jeffpinto/Projects/outbound_with_jeff_and_marv"
+      ],
+      "forbidden": [
+        "wt-outbound-v3",
+        "Tailscale Serve"
+      ]
+    },
+    {
+      "id": "crm-importer-fail-closed",
+      "type": "text_contract",
+      "paths": ["${HOME}/.local/bin/sweep-crm-import.py"],
+      "required": [
+        "SWEEP_IMPORT_ENABLED",
+        "first-30-send re-enable review"
+      ]
+    },
+    {
+      "id": "daily-sweep-fail-closed",
+      "type": "text_contract",
+      "paths": [
+        "${PROJECTS}/outbound_with_jeff_and_marv/scripts/run_daily_sweep.sh"
+      ],
+      "required": [
+        "DAILY_SWEEP_ENABLED",
+        "DAILY_SWEEP_EXPECTED_REV",
+        "git status --porcelain"
+      ],
+      "forbidden": [
+        "git pull"
+      ]
+    },
+    {
+      "id": "notes-wiki-old-roots",
+      "type": "text_absent",
+      "paths": ["${PROJECTS}/notes-vault/scripts/wiki/projects_notes.json"],
+      "patterns": [
+        "jeffpinto-site/pitches/mattel",
+        "mattel-supply.jeffpinto.com",
+        "smartams.jeffpinto.com",
+        "Roster of 7"
+      ]
+    },
+    {
+      "id": "reading-domain-advertising-truth",
+      "type": "text_absent",
+      "paths": [
+        "${PROJECTS}/jeffpinto-site/prototypes/reading-new-domain/README.md",
+        "${PROJECTS}/jeffpinto-site/prototypes/reading-new-domain/note.md",
+        "${PROJECTS}/jeffpinto-site/prototypes/reading-new-domain/note.html",
+        "${PROJECTS}/jeffpinto-site/prototypes/reading-new-domain/workbook.html",
+        "${PROJECTS}/jeffpinto-site/prototypes/index.html",
+        "${PROJECTS}/jeffpinto-site/docs/SOURCING.md"
+      ],
+      "patterns": [
+        "github\\.com/bigbrownjeff/reading-new-domain",
+        "bigbrownjeff\\.github\\.io/reading-new-domain"
+      ]
+    },
+    {
+      "id": "limina-retirement-contract",
+      "type": "text_contract",
+      "paths": [
+        "${PROJECTS}/prevalence-audit-cli/README.md",
+        "${PROJECTS}/prevalence-audit-cli/demo/LUNCH-CHEATSHEET.md",
+        "${PROJECTS}/prevalence-audit-cli/webdemo/site/functions/_middleware.js"
+      ],
+      "required": [
+        "retired",
+        "2026-07-30"
+      ],
+      "forbidden": [
+        "Gated demo page:",
+        "context\\.next\\(\\)"
+      ]
+    },
+    {
+      "id": "registry-stale-operating-cues",
+      "type": "text_absent",
+      "paths": ["${HOME}/.claude/links/registry.json"],
+      "patterns": [
+        "needs serve --host 0\\.0\\.0\\.0",
+        "hold until 07-23 gate",
+        "\\\"label\\\": \\\"Gated demo\\\"",
+        "ungate-confirm queued",
+        "Redeploy path preserved",
+        "loop doctrine v3"
+      ]
+    },
+    {
+      "id": "bluecamel-public-doc-contract",
+      "type": "text_contract",
+      "paths": ["${PROJECTS}/bluecamel-site/README.md"],
+      "required": [
+        "intentionally public",
+        "Gate removal merged to main on 2026-07-30"
+      ],
+      "forbidden": [
+        "Prelaunch gate:",
+        "ONLY after 2026-07-23 launch gate"
+      ]
+    },
+    {
+      "id": "glaunch-live-queue-state",
+      "type": "text_contract",
+      "paths": ["${PROJECTS}/.claude/board-reviews/APPROVAL-QUEUE.md"],
+      "required": [
+        "G-LAUNCH.*cleared.*2026-07-30",
+        "not a launch, send, publication, signing, or Mattel delivery blocker",
+        "the surface-specific content pass remains"
+      ],
+      "forbidden": [
+        "is the blocking item this week",
+        "still P0 in blocking-relationship terms",
+        "gate stays binding until they do"
+      ]
+    },
+    {
+      "id": "global-symlinks",
+      "type": "tree_symlinks",
+      "roots": [
+        "${HOME}/.claude/skills",
+        "${HOME}/.claude/agents",
+        "${HOME}/.claude/links"
+      ]
+    },
+    {
+      "id": "global-skill-provenance",
+      "type": "skill_provenance",
+      "manifest": "${PROJECTS}/estate-watch/config/skill-provenance.json"
+    },
+    {
+      "id": "project-symlinks",
+      "type": "tree_symlinks",
+      "roots": ["${PROJECTS}"],
+      "exclude_dirs": [
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "dist",
+        "build",
+        ".next",
+        ".astro"
+      ]
+    },
+    {
+      "id": "hygiene-install",
+      "type": "same_file",
+      "source": "${PROJECTS}/estate-watch/local-tools/projects-hygiene.sh",
+      "target": "${HOME}/.claude/bin/projects-hygiene.sh"
+    },
+    {
+      "id": "hygiene-audit-only",
+      "type": "text_contract",
+      "paths": ["${HOME}/.claude/bin/projects-hygiene.sh"],
+      "required": ["worktree-janitor.py\" --dry-run"],
+      "forbidden": ["sqlite-lint.py\" --failtask"]
+    },
+    {
+      "id": "bluecamel-site",
+      "type": "url",
+      "url": "https://bluecamelconsulting.com/",
+      "expect": "public",
+      "allowed_status": [200],
+      "required_body_pattern": "Blue Camel",
+      "forbidden_body_pattern": "\\bnoindex\\b"
+    },
+    {
+      "id": "bluecamel-pages-public",
+      "type": "url",
+      "url": "https://bluecamel-site.pages.dev/",
+      "expect": "public",
+      "allowed_status": [200],
+      "required_body_pattern": "Blue Camel",
+      "forbidden_body_pattern": "\\bnoindex\\b"
+    },
+    {
+      "id": "brand-safety-public",
+      "type": "url",
+      "url": "https://brand-safety-demo.pages.dev/",
+      "expect": "public",
+      "allowed_status": [200],
+      "forbidden_body_pattern": "\\bnoindex\\b"
+    },
+    {
+      "id": "cc-compliance-public",
+      "type": "url",
+      "url": "https://cc-compliance-demo.pages.dev/",
+      "expect": "public",
+      "allowed_status": [200],
+      "forbidden_body_pattern": "\\bnoindex\\b"
+    },
+    {
+      "id": "camh-public",
+      "type": "url",
+      "url": "https://camh-subgroup-demo.pages.dev/",
+      "expect": "public",
+      "allowed_status": [200],
+      "forbidden_body_pattern": "\\bnoindex\\b"
+    },
+    {
+      "id": "reading-note-public",
+      "type": "url",
+      "url": "https://jeffpinto.com/notes/reading-new-domain/",
+      "expect": "public",
+      "allowed_status": [200],
+      "allowed_final_hosts": ["jeffpinto.com", "www.jeffpinto.com"]
+    },
+    {
+      "id": "reading-repo-unpublished",
+      "type": "url",
+      "url": "https://github.com/bigbrownjeff/reading-new-domain",
+      "expect": "unpublished",
+      "allowed_status": [404]
+    },
+    {
+      "id": "reading-demo-unpublished",
+      "type": "url",
+      "url": "https://bigbrownjeff.github.io/reading-new-domain/workbook.html",
+      "expect": "unpublished",
+      "allowed_status": [404]
+    },
+    {
+      "id": "crm-gated",
+      "type": "url",
+      "url": "https://crm.bluecamelconsulting.com/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "photo-atlas-paused",
+      "type": "url",
+      "url": "https://photos.jeffpinto.com/",
+      "expect": "paused",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "mattel-public-retired",
+      "type": "url",
+      "url": "https://mattel-supply.jeffpinto.com/",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    },
+    {
+      "id": "mattel-margin-radar-custom-retired",
+      "type": "url",
+      "url": "https://margin-radar.jeffpinto.com/",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    },
+    {
+      "id": "mattel-margin-radar-pages-retired",
+      "type": "url",
+      "url": "https://margin-radar.pages.dev/",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    },
+    {
+      "id": "mattel-margin-radar-otif-retired",
+      "type": "url",
+      "url": "https://margin-radar.pages.dev/otif.html",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    },
+    {
+      "id": "mattel-margin-radar-peak-retired",
+      "type": "url",
+      "url": "https://margin-radar.pages.dev/peak.html",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    },
+    {
+      "id": "limina-custom-retired",
+      "type": "url",
+      "url": "https://limina-demo.bluecamelconsulting.com/",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    },
+    {
+      "id": "limina-pages-retired",
+      "type": "url",
+      "url": "https://limina-demo.pages.dev/",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    },
+    {
+      "id": "smartams-public-retired",
+      "type": "url",
+      "url": "https://smartams.jeffpinto.com/",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    },
+    {
+      "id": "smartams-pages-retired",
+      "type": "url",
+      "url": "https://smartams.pages.dev/",
+      "expect": "retired",
+      "allowed_status": [404, 410]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# Dated output of scripts/estate_drift.py / the staleness-audit report generator.
+# Generated, not source — the versioned source is config/estate-drift.json + the
+# scripts themselves. Re-running the audit reproduces these.
+/reports/
+
+# Python bytecode caches from local test/tool runs.
+__pycache__/
+*.pyc

@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "verified": "2026-08-06",
+  "install_root": "${HOME}/.claude/skills",
+  "skills": [
+    {
+      "name": "adversarial-panel",
+      "mode": "symlink",
+      "source": "${PROJECTS}/claude-skills/skills/adversarial-panel"
+    },
+    {
+      "name": "agentic-loop",
+      "mode": "same_tree",
+      "source": "${PROJECTS}/personas/.claude/skills/agentic-loop"
+    },
+    {
+      "name": "agents-sdk",
+      "mode": "tree_hash",
+      "sha256": "c90f770dc9cc891475f4ab7ab37b6dc636ec937e5033e27f8e5827c949cda395",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/agents-sdk"
+    },
+    {
+      "name": "client-workup",
+      "mode": "same_tree",
+      "source": "${PROJECTS}/client-pitches/.claude/skills/client-workup"
+    },
+    {
+      "name": "cloudflare",
+      "mode": "tree_hash",
+      "sha256": "2cb115d38180ca566398f5c314ed6ec49c7c8596d527f3dcd411d358ab331d52",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/cloudflare"
+    },
+    {
+      "name": "cloudflare-email-service",
+      "mode": "tree_hash",
+      "sha256": "80e45a0145e18bedf7cdb6af0d323d3def8423e89265827fd3a571135d8f39c5",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/cloudflare-email-service"
+    },
+    {
+      "name": "cloudflare-one",
+      "mode": "tree_hash",
+      "sha256": "177e91323c5e9e564e320c133d9b46f3b9091074b238318fd631d6f869896397",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/cloudflare-one"
+    },
+    {
+      "name": "cloudflare-one-migrations",
+      "mode": "tree_hash",
+      "sha256": "410c30b4a7b63c7bf05d0172253a2222749e09ff1a56bd629bd221ecb0da20a7",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/cloudflare-one-migrations"
+    },
+    {
+      "name": "dry-run-backfill",
+      "mode": "symlink",
+      "source": "${PROJECTS}/claude-skills/skills/dry-run-backfill"
+    },
+    {
+      "name": "durable-objects",
+      "mode": "tree_hash",
+      "sha256": "0a0c2b6db4a6aa2731e5eb036b9dae59cc06106ad997d3b4f77b7acef5760500",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/durable-objects"
+    },
+    {
+      "name": "ground-claims",
+      "mode": "symlink",
+      "source": "${PROJECTS}/claude-skills/skills/ground-claims"
+    },
+    {
+      "name": "headless-pdf",
+      "mode": "symlink",
+      "source": "${PROJECTS}/claude-skills/skills/headless-pdf"
+    },
+    {
+      "name": "marketing-critique",
+      "mode": "same_tree",
+      "source": "${PROJECTS}/personas/.claude/skills/marketing-critique"
+    },
+    {
+      "name": "notes-log",
+      "mode": "same_tree",
+      "source": "${PROJECTS}/notes-vault/skills/notes-log"
+    },
+    {
+      "name": "orchestrate",
+      "mode": "symlink",
+      "source": "${PROJECTS}/claude-skills/skills/orchestrate"
+    },
+    {
+      "name": "pdf-extract",
+      "mode": "symlink",
+      "source": "${PROJECTS}/claude-skills/skills/pdf-extract"
+    },
+    {
+      "name": "persona-author",
+      "mode": "same_tree",
+      "source": "${PROJECTS}/personas/.claude/skills/persona-author"
+    },
+    {
+      "name": "project-init",
+      "mode": "symlink",
+      "source": "${PROJECTS}/claude-skills/skills/project-init"
+    },
+    {
+      "name": "root-cause",
+      "mode": "symlink",
+      "source": "${PROJECTS}/claude-skills/skills/root-cause"
+    },
+    {
+      "name": "sandbox-sdk",
+      "mode": "tree_hash",
+      "sha256": "2d08185463a565fd93dc2d73fe1b9d02291dac11d67fa330d2f035ee4bc0035d",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/sandbox-sdk"
+    },
+    {
+      "name": "ship-pr",
+      "mode": "same_tree",
+      "source": "${PROJECTS}/estate-watch/local-tools/skills/ship-pr"
+    },
+    {
+      "name": "tailor-cv",
+      "mode": "same_tree",
+      "source": "${PROJECTS}/career/.claude/skills/tailor-cv"
+    },
+    {
+      "name": "turnstile-spin",
+      "mode": "tree_hash",
+      "sha256": "80d96006bb8e44634fcc5a711db525e742f8874cc2e56ddf616ddc3b0966588e",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/turnstile-spin"
+    },
+    {
+      "name": "web-perf",
+      "mode": "tree_hash",
+      "sha256": "c1c7eb1abf407132b9982bae412f95ac7b99ac878a41c7baaca7a6340f9b113d",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/web-perf"
+    },
+    {
+      "name": "workers-best-practices",
+      "mode": "tree_hash",
+      "sha256": "742112130c21749776f9f044b01f1416c4beb81f55d39a19732a67e407e0619e",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/workers-best-practices"
+    },
+    {
+      "name": "wrangler",
+      "mode": "tree_hash",
+      "sha256": "fb8f46ad2bbdaa0c8e0bef216a8e8bf6b9e995a8a18253d4f3baa3b605f518c0",
+      "upstream": "https://github.com/cloudflare/skills/tree/30553f89ae1ef1e3c2917cd09d72dac992bb4e9a/skills/wrangler"
+    }
+  ]
+}
