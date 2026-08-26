@@ -70,6 +70,11 @@
       "source": "${PROJECTS}/claude-skills/skills/headless-pdf"
     },
     {
+      "name": "inline-vs-spawn",
+      "mode": "installed_only",
+      "note": "authored directly under install_root 2026-08-17; no canonical repo source exists"
+    },
+    {
       "name": "marketing-critique",
       "mode": "same_tree",
       "source": "${PROJECTS}/personas/.claude/skills/marketing-critique"
@@ -98,6 +103,11 @@
       "name": "project-init",
       "mode": "symlink",
       "source": "${PROJECTS}/claude-skills/skills/project-init"
+    },
+    {
+      "name": "refresh-insights",
+      "mode": "installed_only",
+      "note": "authored directly under install_root 2026-08-11 for the site-insights project; no canonical repo source exists"
     },
     {
       "name": "root-cause",
