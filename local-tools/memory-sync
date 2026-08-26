@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+"""memory-sync — keep doctrine-grade memories identical across Jeff's Claude profiles.
+
+Three profiles keep independent memory stores that drift:
+
+    ~/.claude/projects/-Users-jeffpinto/memory/            (main)
+    ~/.claude-claudine/projects/-Users-jeffpinto/memory/   (claudine)
+    ~/.claude-claudette/projects/-Users-jeffpinto/memory/  (claudette)
+
+Each store is one-fact-per-file markdown with YAML-ish frontmatter, plus a
+MEMORY.md index that is loaded into every session of that profile. A doctrine
+rule learned in one profile is invisible to the other two until someone copies
+it by hand (2026-08-26: persona-check-is-rule-zero, hand-copied three ways, and
+the copies were not even byte-identical).
+
+WHAT SYNCS ("doctrine-grade") — derived by reading all 134 memories, not assumed:
+
+  type: feedback  -> rules about HOW to work with Jeff. Profile-agnostic by
+                     construction; a missing one makes a profile repeat a
+                     correction Jeff already paid for once.
+  type: user      -> facts about Jeff the person. True in every profile.
+
+  type: project   -> current workstream state, carrying dates that expire
+                     ("sendable ~Aug 26-28", "go/no-go 08-24"). Churns; the
+                     churn is the concurrent-write hazard. LOCAL by default.
+  type: reference -> pointers into external systems whose access is itself
+                     profile-scoped (which MCPs are wired), and some are
+                     secret-adjacent. Replicating them widens that surface for
+                     little gain. LOCAL by default.
+
+  Overrides, per file, in the frontmatter metadata block:
+      sync: true    force a project/reference memory to travel
+      sync: false   pin a feedback/user memory to its own profile
+
+CONFLICT DOCTRINE — never trust a version header, only content:
+
+  Both drifted files found on the first run carried metadata.modified stamps
+  that could not be trusted (client-email-voice-deltas.md: IDENTICAL stamps,
+  20KB of body missing on one side). So `modified` is reported as evidence for
+  a human and is NEVER used to pick a winner. The ladder is:
+
+    1. identical sha1                       -> no-op
+    2. absent on a target                   -> ADD  (provably lossless)
+    3. one side is a strict line-superset   -> PROMOTE (provably lossless:
+                                               every line of the loser survives)
+    4. anything else                        -> CONFLICT. No write, ever.
+                                               Quarantined + filed to the board.
+
+  Only 2 and 3 are applied unattended. Rule 4 is the unattended-judgment ban:
+  an automated process may propagate an addition, never adjudicate ambiguity.
+
+  Deletions never propagate. A file present in >=1 store is pushed to all; to
+  retire a doctrine memory everywhere use `--retire <name>`.
+
+Usage:
+  memory-sync                 dry run: print the plan, write nothing (default)
+  memory-sync --apply         snapshot all stores, then apply ADD/PROMOTE
+  memory-sync --check         exit 1 if any sync-eligible drift or conflict
+  memory-sync --scheduled     launchd mode: apply lossless, failtask the rest
+  memory-sync --retire NAME   remove a memory + its index line from all stores
+  memory-sync --verbose       show per-file evidence
+
+Exit codes: 0 clean/applied · 1 drift present (--check) · 2 conflicts present
+"""
+
+import argparse
+import datetime as dt
+import difflib
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+HOME = os.path.expanduser("~")
+REL = os.path.join("projects", "-Users-jeffpinto", "memory")
+PROFILES = {
+    "main": os.path.join(HOME, ".claude"),
+    "claudine": os.path.join(HOME, ".claude-claudine"),
+    "claudette": os.path.join(HOME, ".claude-claudette"),
+}
+VAULT = os.path.join(HOME, "data-vaults", "claude-memory")
+SNAPSHOTS = os.path.join(VAULT, "snapshots")
+QUARANTINE = os.path.join(VAULT, "conflicts")
+LOCKDIR = os.path.join(HOME, ".claude", "failures", ".memory-sync.lockdir")
+FAILTASK = os.path.join(HOME, ".claude", "bin", "failtask")
+INDEX = "MEMORY.md"
+
+SYNC_TYPES = {"feedback", "user"}
+# A file touched within this many seconds may be mid-write by a live session.
+FRESH_SECONDS = 120
+SNAPSHOT_KEEP = 30
+
+
+# ---------------------------------------------------------------- store model
+
+def memdir(profile):
+    return os.path.join(PROFILES[profile], REL)
+
+
+def sha(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def read(path):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def frontmatter(text):
+    """Return the metadata block as a flat dict. Deliberately tolerant: these
+    files are written by several different agents and are not strict YAML."""
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    if not m:
+        return {}
+    out = {}
+    for line in m.group(1).splitlines():
+        kv = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$", line)
+        if kv:
+            out.setdefault(kv.group(1), kv.group(2))
+    return out
+
+
+def eligible(text):
+    """Is this memory doctrine-grade? Returns (bool, reason)."""
+    fm = frontmatter(text)
+    flag = fm.get("sync", "").strip().strip('"').lower()
+    if flag == "false":
+        return False, "sync: false"
+    if flag == "true":
+        return True, "sync: true"
+    mtype = fm.get("type", "").strip().strip('"')
+    if mtype in SYNC_TYPES:
+        return True, "type: %s" % mtype
+    return False, "type: %s" % (mtype or "none")
+
+
+def scan():
+    """{name: {profile: {text, sha, mtime, eligible, reason}}}"""
+    store = {}
+    for profile in PROFILES:
+        d = memdir(profile)
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(".md") or fn == INDEX:
+                continue
+            p = os.path.join(d, fn)
+            if not os.path.isfile(p):
+                continue
+            text = read(p)
+            ok, reason = eligible(text)
+            store.setdefault(fn, {})[profile] = {
+                "text": text,
+                "sha": sha(text),
+                "mtime": os.path.getmtime(p),
+                "modified": frontmatter(text).get("modified", ""),
+                "eligible": ok,
+                "reason": reason,
+                "path": p,
+            }
+    return store
+
+
+# ------------------------------------------------------------ merge decisions
+
+def superset(a, b):
+    """True if every line of b appears in a and a is strictly larger.
+    This is the no-data-loss proof: promoting a over b cannot drop a line."""
+    la, lb = a.splitlines(), b.splitlines()
+    if len(la) < len(lb):
+        return False
+    ca, cb = set(la), set(lb)
+    return cb <= ca and a != b
+
+
+def lost_lines(winner, loser):
+    return [l for l in loser.splitlines() if l.strip() and l not in set(winner.splitlines())]
+
+
+def decide(name, per_profile):
+    """Return (action, winner_profile, detail).
+
+    action in {"clean", "add", "promote", "conflict", "skip"}
+    """
+    live = {p: v for p, v in per_profile.items()}
+    elig = {p: v for p, v in live.items() if v["eligible"]}
+    if not elig:
+        return "skip", None, "not doctrine-grade in any store"
+    # An explicit sync:false anywhere pins the whole memory: never overwrite a
+    # profile that has deliberately opted out.
+    pinned = [p for p, v in live.items() if v["reason"] == "sync: false"]
+    if pinned:
+        return "skip", None, "pinned local by %s" % ", ".join(sorted(pinned))
+
+    shas = {v["sha"] for v in elig.values()}
+    missing = [p for p in PROFILES if p not in live]
+
+    if len(shas) == 1:
+        if not missing:
+            return "clean", None, ""
+        src = sorted(elig)[0]
+        return "add", src, "absent in %s" % ", ".join(sorted(missing))
+
+    # Content differs. Find a single winner that is a superset of every other.
+    winners = []
+    for p, v in elig.items():
+        others = [w["text"] for q, w in elig.items() if q != p]
+        if all(v["text"] == o or superset(v["text"], o) for o in others):
+            winners.append(p)
+    winners = [p for p in winners
+               if any(elig[p]["text"] != elig[q]["text"] for q in elig if q != p)]
+    if len(winners) == 1:
+        w = winners[0]
+        tail = " and absent in %s" % ", ".join(sorted(missing)) if missing else ""
+        return "promote", w, "%s is a strict line-superset of every other copy%s" % (w, tail)
+
+    return "conflict", None, "no copy contains all the others"
+
+
+# ----------------------------------------------------------------- index (MEMORY.md)
+
+def index_path(profile):
+    return os.path.join(memdir(profile), INDEX)
+
+
+def index_lines(profile):
+    p = index_path(profile)
+    return read(p).splitlines() if os.path.exists(p) else []
+
+
+def find_index_line(lines, name):
+    """Index entries look like:  - [Title](file.md) — hook
+    Match on the link target only; titles and hooks are free-form."""
+    pat = re.compile(r"\]\(\s*%s\s*\)" % re.escape(name))
+    for i, line in enumerate(lines):
+        if pat.search(line):
+            return i
+    return -1
+
+
+def plan_index(name, source_profile, targets):
+    """[(profile, 'append'|'replace', line)] — never duplicates, never touches
+    a line belonging to a different memory."""
+    src = index_lines(source_profile)
+    i = find_index_line(src, name)
+    if i < 0:
+        return []
+    line = src[i]
+    out = []
+    for p in targets:
+        lines = index_lines(p)
+        j = find_index_line(lines, name)
+        if j < 0:
+            out.append((p, "append", line))
+        elif lines[j] != line:
+            out.append((p, "replace", line))
+    return out
+
+
+def write_index(profile, name, line, mode):
+    p = index_path(profile)
+    before = read(p) if os.path.exists(p) else "# Memory index\n"
+    lines = before.splitlines()
+    j = find_index_line(lines, name)
+    if mode == "replace" and j >= 0:
+        lines[j] = line
+    elif j < 0:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines.append(line)
+    else:
+        return False
+    atomic_write(p, "\n".join(lines) + "\n", expect=before)
+    return True
+
+
+# ---------------------------------------------------------------------- io
+
+def atomic_write(path, text, expect=None):
+    """Write via temp + rename so a concurrent reader never sees a half file.
+    `expect` guards read-modify-write: if the file changed since we read it,
+    a live session got there first and we back off rather than clobber."""
+    if expect is not None and os.path.exists(path):
+        if read(path) != expect:
+            raise RuntimeError("changed under us: %s" % path)
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".memory-sync.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def snapshot(tag="pre-sync"):
+    os.makedirs(SNAPSHOTS, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y-%m-%dT%H%M%S")
+    out = os.path.join(SNAPSHOTS, "claude-memory-%s-%s.tar.gz" % (stamp, tag))
+    with tarfile.open(out, "w:gz") as tar:
+        for profile in PROFILES:
+            d = memdir(profile)
+            if os.path.isdir(d):
+                tar.add(d, arcname=profile)
+    keep = sorted(f for f in os.listdir(SNAPSHOTS) if f.endswith(".tar.gz"))
+    for old in keep[:-SNAPSHOT_KEEP]:
+        os.unlink(os.path.join(SNAPSHOTS, old))
+    with open(os.path.join(VAULT, "last-ok.json"), "w") as fh:
+        json.dump({"snapshot": out, "ts": dt.datetime.now().isoformat()}, fh, indent=2)
+    return out
+
+
+def quarantine(name, per_profile):
+    os.makedirs(QUARANTINE, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y-%m-%d")
+    saved = []
+    for p, v in sorted(per_profile.items()):
+        dest = os.path.join(QUARANTINE, "%s.%s.%s.txt" % (name[:-3], p, stamp))
+        if not os.path.exists(dest):
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(v["text"])
+        saved.append(dest)
+    return saved
+
+
+def lock():
+    try:
+        os.makedirs(LOCKDIR)
+        return True
+    except FileExistsError:
+        try:
+            age = dt.datetime.now().timestamp() - os.path.getmtime(LOCKDIR)
+            if age > 1800:          # a run that old is dead, not running
+                return True
+        except OSError:
+            pass
+        return False
+
+
+def unlock():
+    try:
+        os.rmdir(LOCKDIR)
+    except OSError:
+        pass
+
+
+def board(title, detail, key):
+    if not os.access(FAILTASK, os.X_OK):
+        return
+    subprocess.run([FAILTASK, "infra", title, "--detail", detail,
+                    "--dedupe-key", key, "--severity", "warn"],
+                   check=False, capture_output=True)
+
+
+# --------------------------------------------------------------------- retire
+
+def retire(name, apply_it):
+    if not name.endswith(".md"):
+        name += ".md"
+    hits = []
+    for profile in PROFILES:
+        f = os.path.join(memdir(profile), name)
+        idx = find_index_line(index_lines(profile), name)
+        if os.path.exists(f) or idx >= 0:
+            hits.append((profile, os.path.exists(f), idx >= 0))
+    if not hits:
+        print("retire: %s is present in no store" % name)
+        return 0
+    for profile, has_file, has_idx in hits:
+        print("  %-10s file=%s index=%s" % (profile, has_file, has_idx))
+    if not apply_it:
+        print("\ndry run — rerun with --apply to remove")
+        return 0
+    snap = snapshot("pre-retire")
+    print("snapshot: %s" % snap)
+    for profile, has_file, has_idx in hits:
+        if has_file:
+            os.unlink(os.path.join(memdir(profile), name))
+        if has_idx:
+            lines = index_lines(profile)
+            j = find_index_line(lines, name)
+            before = read(index_path(profile))
+            del lines[j]
+            atomic_write(index_path(profile), "\n".join(lines) + "\n", expect=before)
+    print("retired %s from %d store(s)" % (name, len(hits)))
+    return 0
+
+
+# ----------------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--scheduled", action="store_true")
+    ap.add_argument("--retire", metavar="NAME")
+    ap.add_argument("--selfcheck", action="store_true",
+                    help="is the installed copy identical to the repo source")
+    ap.add_argument("--verbose", "-v", action="store_true")
+    args = ap.parse_args()
+
+    if args.selfcheck:
+        src = os.path.join(HOME, "Projects", "estate-watch", "local-tools", "memory-sync")
+        inst = os.path.join(HOME, ".claude", "bin", "memory-sync")
+        if not os.path.exists(src):
+            print("selfcheck: no repo source at %s (running unversioned)" % src)
+            return 1
+        if not os.path.exists(inst):
+            print("selfcheck: NOT INSTALLED at %s" % inst)
+            return 1
+        if sha(read(src)) != sha(read(inst)):
+            print("selfcheck: DRIFT — installed copy differs from %s" % src)
+            print("  fix: install -m 0755 %s %s" % (src, inst))
+            return 1
+        print("selfcheck: installed copy is identical to the repo source")
+        return 0
+
+    if args.retire:
+        return retire(args.retire, args.apply)
+
+    writing = args.apply or args.scheduled
+    if writing and not lock():
+        print("memory-sync: another run holds the lock; skipping", file=sys.stderr)
+        return 0
+
+    try:
+        store = scan()
+        adds, promotes, conflicts, clean, skipped = [], [], [], 0, 0
+        now = dt.datetime.now().timestamp()
+
+        for name in sorted(store):
+            per = store[name]
+            action, winner, detail = decide(name, per)
+            if action == "skip":
+                skipped += 1
+                continue
+            if action == "clean":
+                clean += 1
+                continue
+            fresh = [p for p, v in per.items() if now - v["mtime"] < FRESH_SECONDS]
+            if fresh and writing:
+                print("  DEFER  %-46s touched <%ds ago in %s"
+                      % (name, FRESH_SECONDS, ",".join(fresh)))
+                continue
+            if action == "conflict":
+                conflicts.append((name, per))
+            elif action == "add":
+                adds.append((name, winner, per, detail))
+            else:
+                promotes.append((name, winner, per, detail))
+
+        # ---- report
+        print("memory-sync %s  (%s)"
+              % ("APPLY" if writing else ("CHECK" if args.check else "DRY RUN"),
+                 dt.datetime.now().strftime("%Y-%m-%d %H:%M")))
+        print("  stores: " + "  ".join(
+            "%s=%d" % (p, len([n for n in store if p in store[n]])) for p in PROFILES))
+        print("  in sync: %d doctrine-grade · local-only: %d" % (clean, skipped))
+        print()
+
+        for name, src, per, why in adds:
+            missing = [p for p in PROFILES if p not in per]
+            print("  ADD      %-46s %s -> %s" % (name, src, ",".join(sorted(missing))))
+            if args.verbose:
+                print("           %s | %s" % (per[src]["reason"], why))
+
+        for name, w, per, why in promotes:
+            losers = sorted([p for p in per if p != w] + [p for p in PROFILES if p not in per])
+            print("  PROMOTE  %-46s %s -> %s" % (name, w, ",".join(losers)))
+            print("           %s" % why)
+            for l in losers:
+                if l not in per:
+                    print("           %s: absent, will be created (0 line(s) lost)" % l)
+                    continue
+                if per[l]["sha"] == per[w]["sha"]:
+                    continue
+                gone = lost_lines(per[w]["text"], per[l]["text"])
+                print("           %s: %d bytes -> %d, %d line(s) lost (0 = provably safe)"
+                      % (l, len(per[l]["text"]), len(per[w]["text"]), len(gone)))
+            if args.verbose:
+                for l in losers:
+                    if l in per and per[l]["sha"] != per[w]["sha"]:
+                        for d in list(difflib.unified_diff(
+                                per[l]["text"].splitlines(), per[w]["text"].splitlines(),
+                                l, w, lineterm="", n=0))[:14]:
+                            print("           | " + d[:150])
+
+        for name, per in conflicts:
+            print("  CONFLICT %-46s no copy contains all the others" % name)
+            for p, v in sorted(per.items()):
+                print("           %-10s %6d bytes  sha %s  modified %s"
+                      % (p, len(v["text"]), v["sha"][:8], v["modified"] or "-"))
+            for a in sorted(per):
+                for b in sorted(per):
+                    if a < b and per[a]["sha"] != per[b]["sha"]:
+                        print("           %s has %d line(s) %s lacks; %s has %d that %s lacks"
+                              % (a, len(lost_lines(per[b]["text"], per[a]["text"])), b,
+                                 b, len(lost_lines(per[a]["text"], per[b]["text"])), a))
+
+        # index plan
+        index_ops = []
+        for name, src, per, _ in adds:
+            index_ops += plan_index(name, src, [p for p in PROFILES if p != src])
+        for name, w, per, _ in promotes:
+            index_ops += plan_index(name, w, [p for p in PROFILES if p != w])
+        if index_ops:
+            print()
+            for p, mode, line in index_ops:
+                print("  INDEX    %-8s %-8s %s" % (p, mode, line[:96]))
+
+        # Index hygiene: report only. Composing an index hook line, or choosing
+        # which of two duplicate lines to keep, is judgment -- not a sync job.
+        unindexed, dupes = [], []
+        for name in sorted(store):
+            if not any(v["eligible"] for v in store[name].values()):
+                continue
+            if all(find_index_line(index_lines(p), name) < 0
+                   for p in PROFILES if p in store[name]):
+                unindexed.append(name)
+        for p in PROFILES:
+            seen = {}
+            for line in index_lines(p):
+                for link in re.findall(r"\]\(([^)]+\.md)\)", line):
+                    seen[link] = seen.get(link, 0) + 1
+            dupes += ["%s: %s x%d" % (p, k, v) for k, v in sorted(seen.items()) if v > 1]
+        if unindexed or dupes:
+            print()
+            for n in unindexed:
+                print("  NOTE     %-46s doctrine-grade but in no MEMORY.md index" % n)
+            for d in dupes:
+                print("  NOTE     duplicate index line  %s" % d)
+            print("           (pre-existing index hygiene; sync never invents or "
+                  "removes an index line)")
+
+        print()
+        print("  totals: %d add · %d promote · %d conflict · %d index line(s)"
+              % (len(adds), len(promotes), len(conflicts), len(index_ops)))
+
+        if args.check:
+            return 2 if conflicts else (1 if (adds or promotes) else 0)
+
+        if not writing:
+            if adds or promotes or conflicts:
+                print("\n  dry run — nothing written. Apply with: memory-sync --apply")
+            return 2 if conflicts else 0
+
+        # ---- apply
+        if adds or promotes:
+            snap = snapshot()
+            print("\n  snapshot: %s" % snap)
+            for name, src, per, _ in adds + [(n, w, p, d) for n, w, p, d in promotes]:
+                text = per[src]["text"]
+                for p in PROFILES:
+                    dest = os.path.join(memdir(p), name)
+                    if p == src:
+                        continue
+                    try:
+                        cur = read(dest) if os.path.exists(dest) else None
+                        if cur == text:
+                            continue
+                        atomic_write(dest, text, expect=cur)
+                        print("  wrote  %s/%s" % (p, name))
+                    except RuntimeError as e:
+                        print("  SKIP   %s (%s)" % (dest, e), file=sys.stderr)
+            for p, mode, line in index_ops:
+                name = re.search(r"\]\(([^)]+)\)", line)
+                if name:
+                    try:
+                        if write_index(p, name.group(1).strip(), line, mode):
+                            print("  index  %s %s %s" % (p, mode, name.group(1)))
+                    except RuntimeError as e:
+                        print("  SKIP   index %s (%s)" % (p, e), file=sys.stderr)
+
+        if conflicts:
+            names = ", ".join(n for n, _ in conflicts)
+            for name, per in conflicts:
+                saved = quarantine(name, per)
+            print("\n  %d conflict(s) NOT written; copies quarantined in %s"
+                  % (len(conflicts), QUARANTINE))
+            if args.scheduled:
+                board("memory-sync: %d doctrine memory conflict(s)" % len(conflicts),
+                      "Divergent copies with no containing version: %s\n"
+                      "Nothing was written. Byte-exact copies of every side are in %s\n"
+                      "Resolve by hand, then rerun: ~/.claude/bin/memory-sync --apply"
+                      % (names, QUARANTINE),
+                      "memory-sync-conflict-" + sha(names)[:12])
+            return 2
+        return 0
+    finally:
+        if writing:
+            unlock()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
