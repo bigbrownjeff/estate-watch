@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  memory-sync — propagate doctrine-grade memories across the three Claude
+  profile stores. Daily 08:45, before the workday's first session loads them.
+
+  Activate:
+    cp ~/Projects/estate-watch/local-tools/launchd/com.jeffpinto.memory-sync.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jeffpinto.memory-sync.plist
+    launchctl kickstart -p gui/$(id -u)/com.jeffpinto.memory-sync
+
+  Deactivate: launchctl bootout gui/$(id -u)/com.jeffpinto.memory-sync
+  By hand:    ~/.claude/bin/memory-sync            (dry run, writes nothing)
+
+  --scheduled applies only the two PROVABLY lossless actions (a memory absent
+  on a target; a copy that is a strict line-superset of every other). A true
+  conflict is never written: both sides are quarantined and a board task is
+  filed. Every write is preceded by a full tar of all three stores.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.jeffpinto.memory-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jeffpinto/.claude/bin/runlog</string>
+    <string>--tag</string>
+    <string>memory-sync</string>
+    <string>/Users/jeffpinto/.claude/bin/memory-sync</string>
+    <string>--scheduled</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>45</integer></dict>
+  <key>StandardOutPath</key><string>/Users/jeffpinto/.claude/logs/memory-sync.log</string>
+  <key>StandardErrorPath</key><string>/Users/jeffpinto/.claude/logs/memory-sync.err</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+</dict>
+</plist>
