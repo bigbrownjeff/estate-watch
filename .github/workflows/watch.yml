@@ -34,22 +34,66 @@ jobs:
           HEARTBEAT_RAW="https://gist.githubusercontent.com/bigbrownjeff/6f2873eb3b1936fea67efc4ae3546aea/raw/heartbeat.txt"
           STALE_HOURS="2.5"
           declare -a DOWN=()
-          # Public edge URLs. UP = any response 2xx/3xx/401/403 (challenge/gate = origin path reachable).
-          check_url () {  # $1 name  $2 url
-            code=$(curl -s -o /dev/null -w "%{http_code}" -m 20 "$2?cb=$RANDOM" || echo 000)
-            case "$code" in 2*|3*|401|403) echo "UP   $1 ($code)";; *) echo "DOWN $1 ($code)"; DOWN+=("$1:$code");; esac
+          # Follow redirects and judge the terminal response. A 3xx is not green by
+          # itself: it may point at a dead or unintended host. Mode `public` requires
+          # terminal 2xx; mode `reachable` also accepts an intentional 401/403
+          # gate. When mode `gated` declares an Access host, even a 401/403 must
+          # terminate on that host; a generic origin/bot denial is not gate proof.
+          # An ordinary public 200 is a failure. Optional $5 is a public marker.
+          check_url () {  # $1 name  $2 url  $3 public|reachable|gated  $4 access-host  $5 marker
+            body=$(mktemp)
+            probe=$(curl -sS -L --max-redirs 5 -A "Mozilla/5.0 estate-watch/1.0" -o "$body" -w "%{http_code}|%{url_effective}" -m 20 "$2?cb=$RANDOM" 2>/dev/null)
+            curl_rc=$?
+            code=${probe%%|*}
+            effective=${probe#*|}
+            # Access login redirects carry signed query metadata. Status checks
+            # need the host/path only, so never print query strings into public
+            # Actions logs or incident bodies.
+            effective_safe=${effective%%\?*}
+            effective_safe=${effective_safe%%\#*}
+            effective_host=${effective_safe#*://}
+            effective_host=${effective_host%%/*}
+            effective_host=${effective_host%%:*}
+            if [ "$curl_rc" -ne 0 ] || [ -z "$code" ]; then code=000; fi
+            mode=${3:-reachable}
+            access_host=${4:-}
+            marker=${5:-}
+            healthy=0
+            case "$mode:$code" in
+              public:2*|reachable:2*|reachable:401|reachable:403)
+                healthy=1;;
+              gated:401|gated:403)
+                if [ -z "$access_host" ] || [ "$effective_host" = "$access_host" ]; then healthy=1; fi;;
+              gated:2*)
+                if [ -n "$access_host" ] && [ "$effective_host" = "$access_host" ]; then healthy=1; fi;;
+            esac
+            if [ "$healthy" = "1" ] && [ "$mode" = "public" ] && [ -n "$marker" ]; then
+              if ! grep -Fqi -- "$marker" "$body"; then healthy=0; fi
+            fi
+            if [ "$healthy" = "1" ]; then
+              echo "UP   $1 ($code -> $effective_safe)"
+            else
+              echo "DOWN $1 ($code -> $effective_safe; expected $mode)"
+              DOWN+=("$1:$code")
+            fi
+            rm -f "$body"
           }
-          if [ -n "${SIMULATE_FAIL:-}" ]; then check_url "SIMULATED" "$SIMULATE_FAIL"; fi
-          check_url "jeffpinto.com"        "https://jeffpinto.com/"
-          check_url "prevalence-audit"     "https://prevalence-audit.jeffpinto.com/"
-          check_url "rvc-taxes"            "https://rvc-taxes.jeffpinto.com/"
-          check_url "crm.bluecamel"        "https://crm.bluecamelconsulting.com/"
+          if [ -n "${SIMULATE_FAIL:-}" ]; then check_url "SIMULATED" "$SIMULATE_FAIL" public; fi
+          check_url "jeffpinto.com"        "https://jeffpinto.com/" public
+          check_url "prevalence-audit"     "https://prevalence-audit.jeffpinto.com/" reachable
+          check_url "rvc-taxes"            "https://rvc-taxes.jeffpinto.com/" public
+          check_url "crm.bluecamel"        "https://crm.bluecamelconsulting.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          # Blue Camel soft-launch proof surfaces are intentionally public. A
+          # 401/403 here is access-regression, not healthy gating.
+          check_url "brand-safety-demo"    "https://brand-safety-demo.pages.dev/" public
+          check_url "cc-compliance-demo"   "https://cc-compliance-demo.pages.dev/" public
+          check_url "camh-subgroup-demo"   "https://camh-subgroup-demo.pages.dev/" public
           # Tunnel-backed surfaces: origin is the laptop, so cloudflared dying takes these
           # down while the edge sites stay green. Lantern is the one with real users.
-          check_url "tunnel:lantern-watch" "https://watch.lantern.family/"
-          check_url "tunnel:atlas"         "https://atlas.lantern.family/"
-          check_url "tunnel:notes"         "https://notes.jeffpinto.com/"
-          check_url "tunnel:bluecamel"     "https://bluecamelconsulting.com/"
+          check_url "tunnel:lantern-watch" "https://watch.lantern.family/" reachable
+          check_url "tunnel:atlas"         "https://atlas.lantern.family/" reachable
+          check_url "tunnel:notes"         "https://notes.jeffpinto.com/" reachable
+          check_url "tunnel:bluecamel"     "https://bluecamelconsulting.com/" public "" "Blue Camel"
           # Laptop heartbeat (dead-man's-switch): gist timestamp fresh?
           hb=$(curl -s -m 20 "$HEARTBEAT_RAW" | head -1 | tr -d '[:space:]')
           if [ -z "$hb" ]; then
