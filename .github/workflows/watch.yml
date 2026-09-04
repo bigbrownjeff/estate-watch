@@ -122,11 +122,11 @@ jobs:
           check_url "gated:cashflow"       "https://cashflow.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
           check_url "gated:line-judge-drift" "https://line-judge-drift-f1d8e1.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
           check_url "gated:launchpad"      "https://links.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
-          # clearshift-locum is deliberately NOT listed here: its host carries an
-          # unguessable slug under the shared *.pages.dev wildcard cert, so unlike
-          # the jeffpinto.com hosts it is not already discoverable in certificate
-          # transparency logs. Access is the real control, but there is no reason to
-          # publish the hostname in a public repo to gain a check on a Jeff-only demo.
+          # clearshift-locum was excluded on 2026-09-04 to keep its unguessable slug
+          # out of a public repo; Jeff reversed that the same day ("make sure it's
+          # public"): Access is the control, and an open gate on this host must read
+          # DOWN like the others.
+          check_url "gated:clearshift-locum" "https://clearshift-locum-9f3a72.pages.dev/" gated "cold-waterfall-c527.cloudflareaccess.com"
           # Laptop heartbeat (dead-man's-switch): gist timestamp fresh?
           hb=$(curl -s -m 20 "$HEARTBEAT_RAW" | head -1 | tr -d '[:space:]')
           if [ -z "$hb" ]; then
