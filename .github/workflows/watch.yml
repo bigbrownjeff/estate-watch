@@ -94,6 +94,39 @@ jobs:
           check_url "tunnel:atlas"         "https://atlas.lantern.family/" reachable
           check_url "tunnel:notes"         "https://notes.jeffpinto.com/" reachable
           check_url "tunnel:bluecamel"     "https://bluecamelconsulting.com/" public "" "Blue Camel"
+          # --- Orphan estate (groundskeeper), added 2026-09-04 -------------------
+          # These are the surfaces no domain persona owns: the client-pitch
+          # one-pagers a prospect may be reading right now, the client review
+          # bundles, the open-source demo, and the gated client properties.
+          # None of them were watched before, which is the blind spot that let a
+          # 4-day-old incident on an unlisted host go unseen on 2026-08-03. Each
+          # public check carries a body marker so a wrong-bundle deploy that
+          # still returns 200 is caught, not just a 404.
+          check_url "pitch:forus"          "https://forus.jeffpinto.com/" public "" "Three problems worth solving at Forus"
+          check_url "pitch:level-agency"   "https://level-agency.jeffpinto.com/" public "" "Three tools the benchmarks report wants to become"
+          check_url "pitch:grand-canyon"   "https://grand-canyon.jeffpinto.com/" public "" "Grand Canyon Education"
+          check_url "pitch:covista"        "https://covista.jeffpinto.com/" public "" "Three reads of Covista"
+          check_url "pitch:clearshift"     "https://clearshift.jeffpinto.com/" public "" "ClearShift"
+          check_url "bundle:iqvia-canada"  "https://iqvia-canada.pages.dev/" public "" "review bundle"
+          check_url "bundle:idesign"       "https://idesign-4ui.pages.dev/" public "" "review bundle"
+          check_url "bundle:arena"         "https://arena-6og.pages.dev/" public "" "review bundle"
+          check_url "bundle:straighterline" "https://straighterline.pages.dev/" public "" "review bundle"
+          check_url "bundle:descript"      "https://descript-e3c.pages.dev/" public "" "review bundle"
+          check_url "bundle:smithrx"       "https://smithrx.pages.dev/" public "" "review bundle"
+          check_url "bundle:corgi"         "https://corgi-insurance.pages.dev/" public "" "review bundle"
+          check_url "bridgetheiep"         "https://bridgetheiep.pages.dev/" public "" "Bridge the IEP"
+          check_url "loop-lab"             "https://loop-lab.jeffpinto.com/" public "" "Loop Lab"
+          check_url "solar-sizing"         "https://bigbrownjeff.github.io/solar-sizing/" public "" "Honest solar sizing"
+          # Gated client properties. A 200 that does NOT terminate on the Access
+          # host is an open gate, which is the failure this mode exists to catch.
+          check_url "gated:cashflow"       "https://cashflow.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          check_url "gated:line-judge-drift" "https://line-judge-drift-f1d8e1.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          check_url "gated:launchpad"      "https://links.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          # clearshift-locum is deliberately NOT listed here: its host carries an
+          # unguessable slug under the shared *.pages.dev wildcard cert, so unlike
+          # the jeffpinto.com hosts it is not already discoverable in certificate
+          # transparency logs. Access is the real control, but there is no reason to
+          # publish the hostname in a public repo to gain a check on a Jeff-only demo.
           # Laptop heartbeat (dead-man's-switch): gist timestamp fresh?
           hb=$(curl -s -m 20 "$HEARTBEAT_RAW" | head -1 | tr -d '[:space:]')
           if [ -z "$hb" ]; then
