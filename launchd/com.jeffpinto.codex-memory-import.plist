@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.jeffpinto.codex-memory-import</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/jeffpinto/.claude/bin/runlog</string><string>--tag</string><string>codex-memory-import</string>
+    <string>/usr/bin/python3</string><string>/Users/jeffpinto/.claude/bin/codex-memory-import</string><string>--write</string><string>--card</string>
+  </array>
+  <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>35</integer></dict>
+  <key>StandardOutPath</key><string>/Users/jeffpinto/.claude/logs/codex-memory-import.log</string>
+  <key>StandardErrorPath</key><string>/Users/jeffpinto/.claude/logs/codex-memory-import.err</string>
+</dict></plist>
