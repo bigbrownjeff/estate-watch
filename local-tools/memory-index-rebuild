@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""memory-index-rebuild: keep a Claude profile's MEMORY.md inside the load budget.
+
+The harness loads MEMORY.md only up to about 24.4K characters and silently drops
+the rest (the session-start warning reads "MEMORY.md is X KB (limit: 24.4KB),
+only part of it was loaded"). With 200+ memories a hook on every line does not
+fit, so this tool rebuilds the index as a whole:
+
+  * one link per bullet (chain lines "[a](a.md) · [b](b.md)" are split);
+  * section headers kept, entries stay under the section they first appear in;
+  * duplicate targets collapsed (first occurrence wins; an empty hook is
+    upgraded by a later non-empty one);
+  * targets whose file is missing in this store are dropped and reported;
+  * hooks kept only in sections whose header matches --hooks-for (default:
+    binding, migrated, new), trimmed to --hook-cap at a word boundary; every
+    other line is "- [Title](file.md)", the title being the cue and the file's
+    description: frontmatter the detail.
+
+Dry run prints the before/after sizes. --write replaces the file atomically and
+aborts if it changed underneath (live sessions append to it). Exit 1 if the
+result is still over --limit, so a monitor can see it.
+
+    memory-index-rebuild ~/.claude-claudette/projects/-Users-jeffpinto/memory/MEMORY.md
+    memory-index-rebuild <MEMORY.md> --write
+"""
+import argparse
+import os
+import re
+import sys
+
+LINK = re.compile(r"\[([^\]]+)\]\(([A-Za-z0-9][A-Za-z0-9_.-]*\.md)\)")
+
+
+def parse_items(line):
+    items = []
+    matches = list(LINK.finditer(line))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
+        hook = line[m.end():end].strip()
+        hook = re.sub(r"^[—–\-·:]+\s*", "", hook)
+        hook = re.sub(r"\s*·\s*$", "", hook).strip()
+        hook = re.sub(r"\s+", " ", hook)
+        items.append((m.group(1).strip(), m.group(2), hook))
+    return items
+
+
+def trim(hook, cap):
+    if cap <= 0:
+        return ""
+    if len(hook) <= cap:
+        return hook
+    cut = hook[:cap]
+    for sep in (" · ", "; ", ". ", ", ", " "):
+        i = cut.rfind(sep)
+        if i > cap * 0.5:
+            return cut[:i].rstrip(" ;,.·")
+    return cut.rstrip()
+
+
+def description_of(memdir, target):
+    try:
+        with open(os.path.join(memdir, target)) as handle:
+            for line in handle:
+                if line.startswith("description:"):
+                    return line.split(":", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+def rebuild(path, hooks_for, hook_cap, limit, write):
+    stat = os.stat(path)
+    with open(path) as handle:
+        lines = handle.read().split("\n")
+    memdir = os.path.dirname(os.path.abspath(path))
+    sections = [("", [])]
+    current = sections[0]
+    seen = {}
+    title_line = lines[0] if lines and lines[0].startswith("# ") else "# Memory index"
+    for line in lines:
+        if line.startswith("# "):
+            continue
+        if line.startswith("#"):
+            current = (line, [])
+            sections.append(current)
+            continue
+        if not line.strip().startswith("- "):
+            continue
+        for title, target, hook in parse_items(line):
+            if target in seen:
+                if not seen[target][1] and hook:
+                    seen[target] = (seen[target][0], hook)
+                continue
+            seen[target] = (title, hook)
+            current[1].append(target)
+    missing = sorted(t for t in seen if not os.path.exists(os.path.join(memdir, t)))
+    keep = re.compile(hooks_for, re.I)
+    out = [title_line, ""]
+    for header, targets in sections:
+        kept = [t for t in targets if t not in missing]
+        if not kept:
+            continue
+        if header:
+            out.append(header)
+        cap = hook_cap if keep.search(header) else 0
+        for t in kept:
+            title, hook = seen[t]
+            if cap and not hook:
+                hook = description_of(memdir, t)
+            h = trim(hook, cap)
+            out.append("- [%s](%s) — %s" % (title, t, h) if h else "- [%s](%s)" % (title, t))
+        out.append("")
+    text = "\n".join(out).rstrip("\n") + "\n"
+    before = "".join(l + "\n" for l in lines)
+    print("%s: %d lines / %d chars -> %d lines / %d chars; %d entries, %d dead link(s) dropped%s"
+          % (path, len(lines), len(before), text.count("\n"), len(text),
+             len(seen) - len(missing), len(missing),
+             (": " + ", ".join(missing)) if missing else ""))
+    over = len(text) > limit
+    if over:
+        print("STILL OVER the %d-char budget by %d" % (limit, len(text) - limit), file=sys.stderr)
+    if write:
+        if os.stat(path).st_mtime != stat.st_mtime:
+            print("ABORT: %s changed while rebuilding; re-run" % path, file=sys.stderr)
+            return 2
+        tmp = path + ".rebuild.tmp"
+        with open(tmp, "w") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+        print("written")
+    return 1 if over else 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("path")
+    ap.add_argument("--hooks-for", default="binding|migrated|new",
+                    help="regex over section headers that keep hooks (default: binding|migrated|new)")
+    ap.add_argument("--hook-cap", type=int, default=120)
+    ap.add_argument("--limit", type=int, default=24000, help="character budget (harness loads ~24.4K)")
+    ap.add_argument("--write", action="store_true")
+    args = ap.parse_args()
+    return rebuild(args.path, args.hooks_for, args.hook_cap, args.limit, args.write)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
