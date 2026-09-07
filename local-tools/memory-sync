@@ -485,24 +485,32 @@ def index_health(store):
     """Per-registered-profile index hygiene (MEM-3, CD-R4-1: checked on every
     profile, not main only).
 
-    Returns (dangling, unindexed, byte_over):
+    Returns (dangling, unindexed, byte_over, dupes):
       dangling   [(profile, line_no, target)] index link -> file that doesn't
                  exist in that profile's store.
       unindexed  [(profile, name)] doctrine-grade memory present+eligible in
                  a profile whose index there has no entry for it.
       byte_over  {profile: (size_bytes, [line_no, ...])} profiles whose
                  MEMORY.md exceeds BYTE_BUDGET, with the lines past it.
+      dupes      ["profile: target xN", ...] index links to the same target
+                 appearing more than once in a profile's index (warn-only;
+                 never affects the exit code — same as before this scan was
+                 folded into index_health()).
     """
     dangling, unindexed = [], []
     byte_over = {}
+    dupes = []
     for p in PROFILES:
         d = memdir(p)
         if not os.path.isdir(d):
             continue
+        seen = {}
         for ln, line in enumerate(index_lines(p), 1):
             for target in re.findall(r"\]\(([^)]+\.md)\)", line):
                 if not os.path.exists(os.path.join(d, target)):
                     dangling.append((p, ln, target))
+                seen[target] = seen.get(target, 0) + 1
+        dupes += ["%s: %s x%d" % (p, k, v) for k, v in sorted(seen.items()) if v > 1]
         ip = index_path(p)
         text = read(ip) if os.path.exists(ip) else ""
         size = len(text.encode("utf-8"))
@@ -517,7 +525,7 @@ def index_health(store):
         for p, v in store[name].items():
             if v["eligible"] and find_index_line(index_lines(p), name) < 0:
                 unindexed.append((p, name))
-    return dangling, unindexed, byte_over
+    return dangling, unindexed, byte_over, dupes
 
 
 # ---------------------------------------------------------------------- io
@@ -823,9 +831,9 @@ def main():
         # eligible memories now FAIL --check, per registered profile; the
         # byte budget only WARNS. Applying sync never invents or removes an
         # index line on its own beyond the ADD/PROMOTE segments above.
-        dangling, unindexed, byte_over = index_health(store)
+        dangling, unindexed, byte_over, dupes = index_health(store)
         unreg = unregistered_profile_dirs()
-        if dangling or unindexed or byte_over or unreg:
+        if dangling or unindexed or byte_over or dupes or unreg:
             print()
             for d in unreg:
                 print("  NOTE     unregistered profile dir  %s (has %s, not in PROFILES)"
@@ -837,6 +845,8 @@ def main():
             for p, (size, over) in sorted(byte_over.items()):
                 print("  NOTE     %s MEMORY.md is %d bytes (budget %d); entries past boundary at line(s) %s"
                       % (p, size, BYTE_BUDGET, ", ".join(str(l) for l in over)))
+            for d in dupes:
+                print("  NOTE     duplicate index line  %s" % d)
             print("           (index hygiene; sync never invents or removes an index line "
                   "beyond the segment(s) above)")
 

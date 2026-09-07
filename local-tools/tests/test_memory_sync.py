@@ -230,6 +230,21 @@ class TestIndex(Base):
         self.assertIn("gone.md", out)
         self.assertNotIn("main line", out)
 
+    def test_duplicate_index_link_in_one_profile_notes_but_does_not_change_exit(self):
+        # W6-V1: a target linked twice in the same profile's index is a
+        # warn-only NOTE (like before this scan moved into index_health()),
+        # never a --check failure on its own.
+        self.mem("main", "rule-e.md", ["type: feedback"], "Rule E body\n")
+        self.index("main", "# Memory index\n"
+                            "- [Rule E](rule-e.md) - hook\n"
+                            "- [Rule E again](rule-e.md) - hook\n")
+        code, out = run(["--apply"])
+        self.assertEqual(code, 0)
+        code, out = run(["--check"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("duplicate index line", out)
+        self.assertIn("main: rule-e.md x2", out)
+
 
 # --------------------------------------------------------------- MEM-4 / decide, superset, lock
 
