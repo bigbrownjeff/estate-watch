@@ -149,3 +149,24 @@ memories and 27 persona-memory files were carried into claudette by hand that mo
 (snapshot `~/data-vaults/claude-memory/snapshots/manual-2026-09-07-pre-claudeux-migration.tar.gz`)
 and the first registered `--apply` carried the other stores' doctrine into it. Never retire a
 profile out of the table; a profile switch means adding the new one here.
+
+## Codex import: `codex-memory-import`
+
+Codex keeps a global, auto-generated memory under `~/.codex/memories` (a git repo:
+`memory_summary.md`, `raw_memories.md`, rollout summaries). It is a different substrate
+and is an IMPORT SOURCE, never a sync target (memory-sisters design, decision 4,
+2026-09-07). `local-tools/codex-memory-import` lifts its "User preferences", "General
+Tips" and `user said:` bullets that no existing memory already covers into
+`~/data-vaults/claude-memory/codex-candidates/<date>.md` for Jeff's review; `--card`
+files one board card per run with candidates. Weekly Sunday 09:35 via
+`launchd/com.jeffpinto.codex-memory-import.plist`. Install: `install -m 0755
+local-tools/codex-memory-import ~/.claude/bin/codex-memory-import` and copy the plist
+to `~/Library/LaunchAgents/`, then `launchctl load`.
+
+## The sisters share one tree (2026-09-07)
+
+Since 2026-09-07 every Claude profile on this Mac resolves `projects/-Users-jeffpinto/memory`
+and `agent-memory` to `~/.claude/...` by symlink (memory-sisters design, decisions 1a and
+1b, Jeff's word). memory-sync among the four PROFILES is therefore a monitor that must
+read clean; its real job is the cross-runtime bridge. The retired per-profile directories
+are archived under `~/data-vaults/claude-memory/retired-dirs/`.

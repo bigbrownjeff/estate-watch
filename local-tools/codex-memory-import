@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""codex-memory-import: lift Codex's auto-generated memories into reviewed candidates.
+
+Codex keeps a global, model-written memory under ~/.codex/memories (memory_summary.md
+with "User preferences" and "General Tips", raw_memories.md with 'user said:' lines).
+It is a different substrate from the curated one-fact-per-file stores, so it is an
+IMPORT SOURCE, never a sync target (memory-sisters design, decision 4, 2026-09-07).
+
+Weekly: read both files, keep every bullet that is not already covered by an existing
+memory (fuzzy match on the words of the bullet against every memory's description and
+title in the shared tree), and write a candidates file for Jeff's review. Nothing is
+written into any memory store. A board card is filed only when there are new candidates.
+
+    codex-memory-import            dry run: print candidates
+    codex-memory-import --write    write ~/data-vaults/claude-memory/codex-candidates/<date>.md
+    codex-memory-import --write --card   also file one failtask card (dedupe key by date)
+"""
+import argparse, datetime, os, re, subprocess, sys
+
+H = os.path.expanduser("~")
+SRC = os.path.join(H, ".codex", "memories")
+STORE = os.path.join(H, ".claude", "projects", "-Users-jeffpinto", "memory")
+OUT = os.path.join(H, "data-vaults", "claude-memory", "codex-candidates")
+SEEN = os.path.join(OUT, "seen.txt")
+FAILTASK = os.path.join(H, ".claude", "bin", "failtask")
+STOP = set("the a an and or of to in on for with is are be by at as it its this that from into your you we i not no never always when if then than only".split())
+
+def words(s):
+    return set(w for w in re.findall(r"[a-z0-9][a-z0-9'-]+", s.lower()) if w not in STOP and len(w) > 2)
+
+def bullets():
+    out = []
+    p = os.path.join(SRC, "memory_summary.md")
+    if os.path.exists(p):
+        section = ""
+        for line in open(p, errors="ignore"):
+            if line.startswith("## "): section = line[3:].strip(); continue
+            if line.startswith("- ") and section in ("User preferences", "General Tips"):
+                out.append((section, line[2:].strip()))
+    p = os.path.join(SRC, "raw_memories.md")
+    if os.path.exists(p):
+        for line in open(p, errors="ignore"):
+            if line.startswith("- user said:"):
+                out.append(("raw user said", line[2:].strip()))
+    return out
+
+def existing():
+    corpus = []
+    for f in os.listdir(STORE):
+        if not f.endswith(".md") or f == "MEMORY.md": continue
+        desc = ""
+        for line in open(os.path.join(STORE, f), errors="ignore"):
+            if line.startswith("description:"): desc = line.split(":", 1)[1]; break
+        corpus.append((f, words(desc) | words(f.replace("-", " "))))
+    return corpus
+
+def covered(b, corpus):
+    wb = words(b)
+    if not wb: return None
+    best = max(corpus, key=lambda c: len(wb & c[1]) / max(len(wb), 1))
+    return best[0] if len(wb & best[1]) / len(wb) >= 0.5 else None
+
+def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--write", action="store_true"); ap.add_argument("--card", action="store_true")
+    a = ap.parse_args()
+    if not os.path.isdir(SRC):
+        print("codex-memory-import: no ~/.codex/memories on this machine; nothing to do"); return 0
+    seen = set(open(SEEN).read().split("\n")) if os.path.exists(SEEN) else set()
+    corpus = existing(); new = []; skipped = 0
+    for section, b in bullets():
+        key = re.sub(r"\s+", " ", b)[:200]
+        if key in seen: continue
+        c = covered(b, corpus)
+        if c: skipped += 1; continue
+        new.append((section, b))
+    mtime = max(os.path.getmtime(os.path.join(SRC, f)) for f in ("memory_summary.md", "raw_memories.md") if os.path.exists(os.path.join(SRC, f)))
+    stamp = datetime.date.fromtimestamp(mtime).isoformat()
+    print("codex memories last regenerated %s; %d new candidate(s), %d already covered by an existing memory" % (stamp, len(new), skipped))
+    for s, b in new: print("  [%s] %s" % (s, b[:160]))
+    if a.write and new:
+        os.makedirs(OUT, exist_ok=True)
+        today = datetime.date.today().isoformat()
+        path = os.path.join(OUT, today + ".md")
+        with open(path, "w") as h:
+            h.write("# Codex memory import candidates, %s\n\nSource: ~/.codex/memories (regenerated %s). Each bullet is a candidate feedback or project memory; nothing is written to a store until Jeff rules. Mark each: keep (write the memory), skip, or already-known.\n\n" % (today, stamp))
+            for s, b in new: h.write("- [ ] (%s) %s\n" % (s, b))
+        with open(SEEN, "a") as h:
+            for s, b in new: h.write(re.sub(r"\s+", " ", b)[:200] + "\n")
+        print("wrote", path)
+        if a.card and os.path.exists(FAILTASK):
+            subprocess.run([FAILTASK, "infra", "Codex memory import: %d candidate(s) to review (%s)" % (len(new), today), "--detail", "Review " + path + "; keep = write the memory in the shared tree; skip = leave. Source last regenerated " + stamp + ".", "--dedupe-key", "codex-memory-import-" + today, "--severity", "warn"], check=False)
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
