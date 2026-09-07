@@ -1,12 +1,13 @@
 # memory-sync — one doctrine across three Claude profiles
 
-Jeff runs three Claude profiles, each with its own memory store:
+Jeff runs four Claude profiles, each with its own memory store:
 
 | profile     | store |
 |-------------|-------|
 | `main`      | `~/.claude/projects/-Users-jeffpinto/memory/` |
 | `claudine`  | `~/.claude-claudine/projects/-Users-jeffpinto/memory/` |
 | `claudette` | `~/.claude-claudette/projects/-Users-jeffpinto/memory/` |
+| `claudeux`  | `~/.claude-claudeux/projects/-Users-jeffpinto/memory/` (jeff@bluecamelconsulting.com; registered 2026-09-07) |
 
 Each store is one-fact-per-file markdown plus a `MEMORY.md` index that is loaded
 into every session of that profile. A rule Jeff issues in one profile is
@@ -140,9 +141,11 @@ never fix the budget by trimming one line by hand.
 
 Install: `install -m 0755 ~/Projects/estate-watch/local-tools/memory-index-rebuild ~/.claude/bin/memory-index-rebuild`
 
-Profiles: as of 2026-09-07 there is a FOURTH profile, `~/.claude-claudeux`
-(jeff@bluecamelconsulting.com, created 2026-09-02), which this tool does not sync.
-Jeff is switching from it to claudette; its 51 stranded memories and 27 persona-memory
-files were migrated by hand on 2026-09-07 (snapshot
-`~/data-vaults/claude-memory/snapshots/manual-2026-09-07-pre-claudeux-migration.tar.gz`).
-Register it here only if Jeff keeps using it.
+Profiles: `~/.claude-claudeux` (jeff@bluecamelconsulting.com, created 2026-09-02) is the
+fourth store since 2026-09-07. Jeff's ruling that day, verbatim: it "should be treated in
+parallel with claudette and claudine so that we have symlink sisters that learn from each
+other". It was the most active profile from 09-02 to 09-07 while unregistered; its 51
+memories and 27 persona-memory files were carried into claudette by hand that morning
+(snapshot `~/data-vaults/claude-memory/snapshots/manual-2026-09-07-pre-claudeux-migration.tar.gz`)
+and the first registered `--apply` carried the other stores' doctrine into it. Never retire a
+profile out of the table; a profile switch means adding the new one here.
