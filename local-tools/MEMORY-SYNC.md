@@ -122,3 +122,27 @@ memory-sync --selfcheck         is the installed copy identical to the repo sour
 ```
 
 Install: `install -m 0755 ~/Projects/estate-watch/local-tools/memory-sync ~/.claude/bin/memory-sync`
+
+## Index budget: `memory-index-rebuild`
+
+The harness loads `MEMORY.md` only up to about 24.4K characters and silently drops
+the rest (session-start warning: "MEMORY.md is X KB (limit: 24.4KB), only part of
+it was loaded"). On 2026-09-07 claudette's index was 25.6K and main's 32K, both
+partially loaded for days. With 200+ memories a hook on every line does not fit.
+
+`local-tools/memory-index-rebuild <MEMORY.md>` rebuilds the index as a whole: one
+link per bullet, sections kept, duplicate targets collapsed, dead links dropped and
+reported, hooks kept only in sections matching `--hooks-for` (default the binding
+rules and any "migrated"/"new" section, cap 120 chars), titles alone elsewhere. Dry
+run by default; `--write` replaces atomically and aborts if the file changed
+underneath. Exit 1 if still over `--limit`. Run it whenever the warning appears;
+never fix the budget by trimming one line by hand.
+
+Install: `install -m 0755 ~/Projects/estate-watch/local-tools/memory-index-rebuild ~/.claude/bin/memory-index-rebuild`
+
+Profiles: as of 2026-09-07 there is a FOURTH profile, `~/.claude-claudeux`
+(jeff@bluecamelconsulting.com, created 2026-09-02), which this tool does not sync.
+Jeff is switching from it to claudette; its 51 stranded memories and 27 persona-memory
+files were migrated by hand on 2026-09-07 (snapshot
+`~/data-vaults/claude-memory/snapshots/manual-2026-09-07-pre-claudeux-migration.tar.gz`).
+Register it here only if Jeff keeps using it.
