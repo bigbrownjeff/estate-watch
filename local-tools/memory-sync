@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """memory-sync — keep doctrine-grade memories identical across Jeff's Claude profiles.
 
-Three profiles keep independent memory stores that drift:
+Four profiles keep independent memory stores that drift:
 
     ~/.claude/projects/-Users-jeffpinto/memory/            (main)
     ~/.claude-claudine/projects/-Users-jeffpinto/memory/   (claudine)
     ~/.claude-claudette/projects/-Users-jeffpinto/memory/  (claudette)
+    ~/.claude-claudeux/projects/-Users-jeffpinto/memory/   (claudeux, registered 2026-09-07)
 
 Each store is one-fact-per-file markdown with YAML-ish frontmatter, plus a
 MEMORY.md index that is loaded into every session of that profile. A doctrine
@@ -82,6 +83,12 @@ PROFILES = {
     "main": os.path.join(HOME, ".claude"),
     "claudine": os.path.join(HOME, ".claude-claudine"),
     "claudette": os.path.join(HOME, ".claude-claudette"),
+    # Jeff, 2026-09-07: claudeux (jeff@bluecamelconsulting.com, created 09-02)
+    # is a full sister, "treated in parallel with claudette and claudine so
+    # that we have symlink sisters that learn from each other". Never retire a
+    # profile out of this table; the 09-06 remediation candidate adds a check
+    # that every ~/.claude* store is listed here.
+    "claudeux": os.path.join(HOME, ".claude-claudeux"),
 }
 VAULT = os.path.join(HOME, "data-vaults", "claude-memory")
 SNAPSHOTS = os.path.join(VAULT, "snapshots")
