@@ -170,3 +170,13 @@ and `agent-memory` to `~/.claude/...` by symlink (memory-sisters design, decisio
 1b, Jeff's word). memory-sync among the four PROFILES is therefore a monitor that must
 read clean; its real job is the cross-runtime bridge. The retired per-profile directories
 are archived under `~/data-vaults/claude-memory/retired-dirs/`.
+
+## Provenance: `status:` is required (2026-09-07)
+
+Memory-sisters design, decision 5. Every memory's frontmatter carries `status: active |
+superseded | retired` (under `metadata:` in profile memories, top level in persona
+memories), with `superseded_by:` and `source:` (platform, profile, session, date)
+recommended for anything written after 2026-09-07. `--check` reports every file without
+`status:` as `PROVENANCE missing status` and exits 1. The 2026-09-07 backfill set
+`status: active` on 291 profile and 496 persona memories. Stores that resolve to the same
+directory (the symlinked sisters) are scanned once.

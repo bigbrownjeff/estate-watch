@@ -551,8 +551,40 @@ def main():
         print("  totals: %d add · %d promote · %d conflict · %d index line(s)"
               % (len(adds), len(promotes), len(conflicts), len(index_ops)))
 
+        # Provenance (memory-sisters design, decision 5, Jeff 2026-09-07): every
+        # memory carries `status:` (active | superseded | retired) in its
+        # frontmatter. A file without it is reported and fails --check, so a
+        # retired rule can never be mistaken for a live one by a sister that
+        # only reads the file. Stores that resolve to one tree are scanned once.
+        no_status, scanned = [], set()
+        for p in PROFILES:
+            d = os.path.realpath(os.path.join(PROFILES[p], REL))
+            if d in scanned or not os.path.isdir(d):
+                continue
+            scanned.add(d)
+            for fn in sorted(os.listdir(d)):
+                if not fn.endswith(".md") or fn == INDEX:
+                    continue
+                try:
+                    with open(os.path.join(d, fn), errors="ignore") as fh:
+                        head = fh.read(4000)
+                except OSError:
+                    continue
+                if not head.startswith("---"):
+                    continue
+                fm = head[3:head.find("\n---", 3)] if head.find("\n---", 3) > 0 else head
+                if not re.search(r"^\s*status:\s*\S", fm, re.M):
+                    no_status.append("%s: %s" % (p, fn))
+        if no_status:
+            print()
+            for n in no_status[:40]:
+                print("  PROVENANCE missing status: %s" % n)
+            if len(no_status) > 40:
+                print("  PROVENANCE ... %d more" % (len(no_status) - 40))
+            print("           (add `status: active` under metadata:; --check fails until every memory carries one)")
+
         if args.check:
-            return 2 if conflicts else (1 if (adds or promotes) else 0)
+            return 2 if conflicts else (1 if (adds or promotes or no_status) else 0)
 
         if not writing:
             if adds or promotes or conflicts:
