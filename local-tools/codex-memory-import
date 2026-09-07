@@ -87,8 +87,29 @@ def main():
         with open(SEEN, "a") as h:
             for s, b in new: h.write(re.sub(r"\s+", " ", b)[:200] + "\n")
         print("wrote", path)
+        # Jeff reads on his phone: the vault note is the deliverable, the file is the receipt
+        # (memory reports-go-to-vault-notes). Best effort; the vault is local to this Mac.
+        vault_url = ""
+        vault = os.path.join(H, "Projects", "notes-vault")
+        if os.path.isdir(vault):
+            note_id = "codex-memory-candidates-" + today
+            try:
+                with open(path) as body:
+                    subprocess.run([sys.executable, "-m", "notes_vault", "log", "--title",
+                                    "Codex memory import candidates (%s): %d to keep or skip" % (today, len(new)),
+                                    "--tag", "infra", "--tag", "memory", "--tag", "review",
+                                    "--source", "launchd", "--id", note_id],
+                                   cwd=vault, stdin=body, check=True, capture_output=True, text=True)
+                import sqlite3
+                c = sqlite3.connect("file:" + os.path.join(vault, "data", "notes.db") + "?mode=ro", uri=True)
+                row = c.execute("select id from notes where source_id = ?", (note_id,)).fetchone()
+                if row:
+                    vault_url = "https://notes.jeffpinto.com/#id=%d" % row[0]
+                    print("vault note", vault_url)
+            except Exception as exc:  # noqa: BLE001
+                print("vault log failed (file still written):", exc, file=sys.stderr)
         if a.card and os.path.exists(FAILTASK):
-            subprocess.run([FAILTASK, "infra", "Codex memory import: %d candidate(s) to review (%s)" % (len(new), today), "--detail", "Review " + path + "; keep = write the memory in the shared tree; skip = leave. Source last regenerated " + stamp + ".", "--dedupe-key", "codex-memory-import-" + today, "--severity", "warn"], check=False)
+            subprocess.run([FAILTASK, "infra", "Codex memory import: %d candidate(s) to review (%s)" % (len(new), today), "--detail", "Read: " + (vault_url or path) + " ; keep = write the memory in the shared tree; skip = leave. Source last regenerated " + stamp + ".", "--dedupe-key", "codex-memory-import-" + today, "--severity", "warn"], check=False)
     return 0
 
 if __name__ == "__main__":
