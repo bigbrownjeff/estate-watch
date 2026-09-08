@@ -101,7 +101,15 @@ def main():
                                     "--source", "launchd", "--id", note_id],
                                    cwd=vault, stdin=body, check=True, capture_output=True, text=True)
                 import sqlite3
-                c = sqlite3.connect("file:" + os.path.join(vault, "data", "notes.db") + "?mode=ro", uri=True)
+                # NOT `file:...?mode=ro`: a read-only handle cannot create the
+                # -shm a WAL reader needs, so that form raises "unable to open
+                # database file" on exactly the runs that follow a clean writer
+                # close (memory sqlite-mode-ro-wal-side-files; it killed the
+                # 2026-09-08 07:05 morning-digest). query_only refuses writes
+                # and still lets the handle make its side files.
+                c = sqlite3.connect(os.path.join(vault, "data", "notes.db"), timeout=30)
+                c.execute("PRAGMA busy_timeout=30000")
+                c.execute("PRAGMA query_only=1")
                 row = c.execute("select id from notes where source_id = ?", (note_id,)).fetchone()
                 if row:
                     vault_url = "https://notes.jeffpinto.com/#id=%d" % row[0]
