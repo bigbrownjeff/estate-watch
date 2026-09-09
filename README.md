@@ -40,5 +40,5 @@ upstream tree digest.
 `local-tools/projects-hygiene.sh` is the versioned source for the weekly local audit
 wrapper. The scheduled wrapper may write its dated report and a desktop notification,
 but it never files tasks or changes repositories: SQLite lint runs without `--failtask`
-and the worktree janitor always runs with `--dry-run`. Synchronize/check the installed
+and the worktree janitor runs with `--auto-safe` (since 2026-09-02: it removes only worktrees that are merged, clean and fully on origin; everything else is listed for a human). Synchronize/check the installed
 copies with `scripts/sync-local-tools.sh --install|--check`.

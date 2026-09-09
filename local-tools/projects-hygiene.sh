@@ -89,13 +89,158 @@ no_remote=$(echo "$facts" | awk -F'|' '$8=="no-upstream"' | wc -l | tr -d ' ')
   echo '```'
 } >> "$report" || true
 
-# Preview candidates only. Applying removals is a separate, explicitly requested
-# operation after a human/agent rechecks exact paths and dirty state.
+# Dangling open threads (2026-08-28: a month-long sweep of handoffs + transcripts
+# found open-thread sections are where tasks go to die — written down, never
+# filed, then lost when the next session reads the board instead of the prose).
+#
+# Report-only here, forever: --file is a deliberate, human-invoked operation.
 {
   echo
-  echo "## Worktree janitor (dry run)"
+  echo "## Dangling open threads (handoffs with no board card)"
   echo '```'
-  /usr/bin/python3 "$HOME/.claude/bin/worktree-janitor.py" --dry-run 2>&1
+  /usr/bin/python3 "$HOME/.claude/bin/dangling-tasks.py" --days 8 2>&1
+  echo '```'
+} >> "$report" || true
+
+# Monday sweep data pull (2026-08-31, board card T-1818 item 1). Folds
+# board-advisor's weekly open-threads DATA PULL into the unattended Sunday
+# run so it stops depending on a human remembering to run it. This section
+# gathers facts only; the judgment pass over these facts still runs by hand
+# on Mondays via board-advisor. Report-only, forever — never files or closes
+# a card itself.
+{
+  echo
+  echo "## Monday sweep (open threads, last 14 days)"
+
+  echo
+  echo "### Handoffs mentioning open threads"
+  thread_pattern='owed|unsent|promised|follow-?up|awaiting|not yet sent|waiting on'
+  handoff_files=$( { find "$HOME/Projects" -path '*/.claude/handoffs/*.md' -mtime -14 \
+                        -not -path '*/_wt/*' -not -path '*worktrees*' \
+                        -not -path '*/notes-vault/data/*' 2>/dev/null; \
+                      find "$HOME/.claude/handoffs" -name '*.md' -mtime -14 2>/dev/null; } | sort -u )
+  found_any=0
+  if [ -n "$handoff_files" ]; then
+    while IFS= read -r hf; do
+      [ -z "$hf" ] && continue
+      matches=$(grep -inE "$thread_pattern" "$hf" 2>/dev/null | head -5)
+      if [ -n "$matches" ]; then
+        found_any=1
+        echo
+        echo "**${hf#"$HOME"/}**"
+        echo "$matches" | while IFS= read -r line; do
+          echo "- ${line:0:200}"
+        done
+      fi
+    done <<HANDOFF_EOF
+$handoff_files
+HANDOFF_EOF
+  fi
+  [ "$found_any" -eq 0 ] && echo "none found"
+
+  echo
+  echo "### CRM contacts past next_step_date"
+  crm_db="$HOME/Projects/outbound_with_jeff_and_marv/data/crm.db"
+  if [ -f "$crm_db" ]; then
+    crm_sql="select id,name,company,status,next_step_date,substr(next_step,1,80) from contacts where next_step_date is not null and next_step_date < date('now') and status not in ('lost','retired-task') order by next_step_date limit 40;"
+    if crm_rows=$(sqlite3 -readonly -separator '|' "$crm_db" "$crm_sql" 2>&1); then
+      if [ -n "$crm_rows" ]; then
+        echo '```'
+        echo "id|name|company|status|next_step_date|next_step"
+        echo "$crm_rows"
+        echo '```'
+      else
+        echo "none found"
+      fi
+    else
+      echo "CANT-TELL: sqlite3 query failed — $crm_rows"
+    fi
+  else
+    echo "CANT-TELL: crm.db not found at $crm_db"
+  fi
+
+  echo
+  echo "### Overdue jeff-owned open board cards"
+  board_json=$(mktemp)
+  if gh project item-list 1 --owner bigbrownjeff --limit 1000 --format json > "$board_json" 2>/tmp/projects-hygiene-gh-err.txt; then
+    board_lines=$(/usr/bin/python3 - "$board_json" "$run_date" <<'PY_EOF' 2>&1
+import json, sys
+path, today = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(path))
+except Exception as e:
+    print("CANT-TELL: gh output not valid JSON — %s" % e)
+    sys.exit(0)
+items = d.get("items", [])
+print("COUNT %d" % len(items))
+if len(items) >= 1000:
+    print("CANT-TELL: item count >= 1000 — list may be truncated, raise --limit")
+rows = []
+for it in items:
+    status = (it.get("status") or "").strip().lower()
+    if status == "done":
+        continue
+    owner = (it.get("owner") or "").strip().lower()
+    if owner not in ("jeff", "either"):
+        continue
+    due = it.get("due")
+    if not due or due >= today:
+        continue
+    ref = it.get("ref", "?")
+    priority = it.get("priority") or ""
+    title = it.get("title") or ""
+    rows.append((due, ref, priority, title))
+rows.sort(key=lambda r: r[0])
+for due, ref, priority, title in rows:
+    line = "T-%s due %s [%s] %s" % (ref, due, priority, title)
+    print(line[:200])
+PY_EOF
+)
+    cant_tell_line=$(echo "$board_lines" | grep '^CANT-TELL' || true)
+    if [ -n "$cant_tell_line" ] && ! echo "$board_lines" | grep -q '^COUNT '; then
+      echo "$cant_tell_line"
+    else
+      count_line=$(echo "$board_lines" | grep '^COUNT ' || true)
+      echo "${count_line:-CANT-TELL: no item count returned}"
+      card_lines=$(echo "$board_lines" | grep -v '^COUNT ')
+      if [ -n "$card_lines" ]; then
+        echo '```'
+        echo "$card_lines"
+        echo '```'
+      else
+        echo "none found"
+      fi
+    fi
+  else
+    gh_err=$(cat /tmp/projects-hygiene-gh-err.txt 2>/dev/null)
+    echo "CANT-TELL: gh project item-list failed — $gh_err"
+  fi
+  rm -f "$board_json" /tmp/projects-hygiene-gh-err.txt
+} >> "$report" || true
+
+# --auto-safe since 2026-09-02: removes ONLY worktrees whose branch is merged,
+# whose tree is clean and whose commits are all on origin; everything else is
+# listed as a candidate for a human/agent to recheck by hand.
+{
+  echo
+  echo "## Worktree janitor (auto-safe: merged, clean and pushed only)"
+  echo '```'
+  /usr/bin/python3 "$HOME/.claude/bin/worktree-janitor.py" --auto-safe 2>&1
+  echo '```'
+} >> "$report" || true
+
+# Versioned-source drift: every tool under ~/.claude/bin that estate-watch owns
+# must match its repo copy, in both directions (2026-09-09: four watchdog fixes
+# existed only on this disk until the table grew).
+{
+  echo
+  echo "## Local tools drift (estate-watch scripts/sync-local-tools.sh --check)"
+  echo '```'
+  if [ -x "$HOME/Projects/estate-watch/scripts/sync-local-tools.sh" ]; then
+    bash "$HOME/Projects/estate-watch/scripts/sync-local-tools.sh" --check 2>&1 || echo "DRIFT: run scripts/sync-local-tools.sh --install from a clean estate-watch checkout, or commit the live copy"
+  else
+    echo "CANT-TELL: ~/Projects/estate-watch/scripts/sync-local-tools.sh not found"
+  fi
   echo '```'
 } >> "$report" || true
 
