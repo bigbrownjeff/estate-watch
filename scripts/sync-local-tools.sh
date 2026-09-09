@@ -1,42 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Versioned sources for the tools installed under ~/.claude. Every row is
+# "<repo path>|<install target>|<mode>". Add a row the day a tool lands in
+# ~/.claude/bin; a tool that lives only there is uncommitted anywhere
+# (2026-09-09: four watchdog fixes existed only on one disk until this table
+# grew). `--check` fails loudly on any drift in either direction; the weekly
+# projects-hygiene run calls it.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:---check}"
 
-sources=(
-  "$repo_root/local-tools/projects-hygiene.sh"
-  "$repo_root/scripts/estate_drift.py"
-  "$repo_root/config/estate-drift.json"
-  "$repo_root/local-tools/skills/ship-pr/SKILL.md"
-  "$repo_root/local-tools/memory-sync"
-)
-targets=(
-  "$HOME/.claude/bin/projects-hygiene.sh"
-  "$HOME/.claude/bin/estate-drift.py"
-  "$HOME/.claude/config/estate-drift.json"
-  "$HOME/.claude/skills/ship-pr/SKILL.md"
-  "$HOME/.claude/bin/memory-sync"
+rows=(
+  "local-tools/projects-hygiene.sh|$HOME/.claude/bin/projects-hygiene.sh|0755"
+  "scripts/estate_drift.py|$HOME/.claude/bin/estate-drift.py|0755"
+  "config/estate-drift.json|$HOME/.claude/config/estate-drift.json|0644"
+  "local-tools/skills/ship-pr/SKILL.md|$HOME/.claude/skills/ship-pr/SKILL.md|0644"
+  "local-tools/memory-sync|$HOME/.claude/bin/memory-sync|0755"
+  "local-tools/memory-index-rebuild|$HOME/.claude/bin/memory-index-rebuild|0755"
+  "local-tools/codex-memory-import|$HOME/.claude/bin/codex-memory-import|0755"
+  "local-tools/gh-board-export.sh|$HOME/.claude/bin/gh-board-export.sh|0755"
+  "local-tools/burn-meter.py|$HOME/.claude/bin/burn-meter.py|0755"
+  "local-tools/phoenix-enrich.py|$HOME/.claude/bin/phoenix-enrich.py|0755"
+  "local-tools/morning-digest.py|$HOME/.claude/bin/morning-digest.py|0755"
+  "local-tools/worktree-janitor.py|$HOME/.claude/bin/worktree-janitor.py|0755"
 )
 
 case "$mode" in
   --check)
-    for i in "${!sources[@]}"; do
-      if [[ ! -f "${targets[$i]}" ]] || ! cmp -s "${sources[$i]}" "${targets[$i]}"; then
-        echo "stale or missing install: ${targets[$i]}" >&2
-        exit 1
+    rc=0
+    for row in "${rows[@]}"; do
+      IFS='|' read -r src dst _ <<<"$row"
+      if [[ ! -f "$repo_root/$src" ]]; then
+        echo "missing versioned source: $src" >&2; rc=1
+      elif [[ ! -f "$dst" ]] || ! cmp -s "$repo_root/$src" "$dst"; then
+        echo "stale or missing install: $dst (source $src)" >&2; rc=1
       fi
     done
-    echo "estate-watch local tools are current"
+    [[ $rc -eq 0 ]] && echo "estate-watch local tools are current (${#rows[@]} tools)"
+    exit $rc
     ;;
   --install)
-    mkdir -p "$HOME/.claude/bin" "$HOME/.claude/config"
-    mkdir -p "$HOME/.claude/skills/ship-pr"
-    install -m 0755 "${sources[0]}" "${targets[0]}"
-    install -m 0755 "${sources[1]}" "${targets[1]}"
-    install -m 0644 "${sources[2]}" "${targets[2]}"
-    install -m 0644 "${sources[3]}" "${targets[3]}"
-    install -m 0755 "${sources[4]}" "${targets[4]}"
+    for row in "${rows[@]}"; do
+      IFS='|' read -r src dst perm <<<"$row"
+      mkdir -p "$(dirname "$dst")"
+      install -m "$perm" "$repo_root/$src" "$dst"
+    done
     "$0" --check
     ;;
   *)
