@@ -19,6 +19,8 @@ rows=(
   "local-tools/memory-index-rebuild|$HOME/.claude/bin/memory-index-rebuild|0755"
   "local-tools/codex-memory-import|$HOME/.claude/bin/codex-memory-import|0755"
   "local-tools/gh-board-export.sh|$HOME/.claude/bin/gh-board-export.sh|0755"
+  "local-tools/board-ref|$HOME/.claude/bin/board-ref|0755"
+  "local-tools/tests/test_gh_board_export_comments.sh|$HOME/.claude/bin/tests/test_gh_board_export_comments.sh|0755"
   "local-tools/burn-meter.py|$HOME/.claude/bin/burn-meter.py|0755"
   "local-tools/phoenix-enrich.py|$HOME/.claude/bin/phoenix-enrich.py|0755"
   "local-tools/morning-digest.py|$HOME/.claude/bin/morning-digest.py|0755"

@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""board-ref -- friendly per-project unique integer ids for GitHub Project #1
+("Jeff - All Projects", owner bigbrownjeff). Jeff, 2026-08-29: PVTI_... hashes
+are too much to quote from a phone; a plain "T-042" is not.
+
+The Ref field (NUMBER, id PVTF_lAHOARM7z84Bd1kfzhgwTtc) holds a sequential
+integer per item, assigned in ascending creation order. "T-NNN" is just that
+integer, zero-padded to 3 digits, printed for humans; the board only ever
+stores the bare number.
+
+Usage:
+  board-ref next              print the next unused integer (max(Ref)+1, min 1001)
+  board-ref assign <item_id>  assign the next Ref to one item, print T-NNN
+  board-ref --backfill        assign Ref to every item on the board missing one,
+                               oldest createdAt first; idempotent; exits 1 if
+                               any item is left without a Ref afterwards
+
+Reads ALL items via cursor-paginated GraphQL (never gh CLI's --limit page cap)
+and asserts the fetched count against the project's own totalCount before
+trusting any max() computed from it.
+
+Rate limiting: GitHub's secondary limit answers as a GraphQL error or a
+non-zero exit with "API rate limit" / "unknown owner type" / "submitted too
+quickly" in the text. On that signal, mutations stop, the script sleeps 15
+minutes in the foreground, and retries once; a second hit exits 1 with the
+error so the caller can report state rather than spin.
+
+Pacing on --backfill: 1.6s between mutations, a 12s breather every 50.
+"""
+from __future__ import annotations
+
+import contextlib
+import fcntl
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from shutil import which
+
+PROJECT_NUMBER = 1
+PROJECT_OWNER = "bigbrownjeff"
+PROJECT_ID = "PVT_kwHOARM7z84Bd1kf"
+REF_FIELD_ID = "PVTF_lAHOARM7z84Bd1kfzhgwTtc"
+
+RATE_LIMIT_MARKERS = (
+    "api rate limit", "unknown owner type", "secondary rate limit",
+    "submitted too quickly", "abuse detection",
+)
+RATE_LIMIT_WAIT_S = 900  # 15 min
+
+
+class RateLimited(Exception):
+    pass
+
+
+def find_gh():
+    for c in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"):
+        if os.access(c, os.X_OK):
+            return c
+    found = which("gh")
+    if not found:
+        sys.exit("board-ref: gh CLI not found on PATH")
+    return found
+
+
+GH = find_gh()
+
+
+def is_rate_limited(msg):
+    low = (msg or "").lower()
+    return any(marker in low for marker in RATE_LIMIT_MARKERS)
+
+
+def with_retry(fn, *args, **kwargs):
+    """Run fn once; on RateLimited, sleep 15 min in the foreground and retry
+    once; a second RateLimited is fatal."""
+    try:
+        return fn(*args, **kwargs)
+    except RateLimited as e:
+        print(f"board-ref: rate limited ({e}); sleeping {RATE_LIMIT_WAIT_S}s then retrying once",
+              file=sys.stderr)
+        time.sleep(RATE_LIMIT_WAIT_S)
+        try:
+            return fn(*args, **kwargs)
+        except RateLimited as e2:
+            sys.exit(f"board-ref: still rate limited after one retry: {e2}")
+
+
+ITEMS_QUERY = """
+query($login:String!, $number:Int!, $cursor:String){
+  user(login:$login){
+    projectV2(number:$number){
+      items(first:100, after:$cursor){
+        totalCount
+        pageInfo{ hasNextPage endCursor }
+        nodes{
+          id
+          createdAt
+          fieldValueByName(name:"Ref"){
+            ... on ProjectV2ItemFieldNumberValue{ number }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _one_page(cursor):
+    args = [GH, "api", "graphql", "-f", f"query={ITEMS_QUERY}",
+            "-f", f"login={PROJECT_OWNER}", "-F", f"number={PROJECT_NUMBER}"]
+    if cursor:
+        args += ["-f", f"cursor={cursor}"]
+    r = subprocess.run(args, capture_output=True, text=True, timeout=90)
+    if r.returncode != 0:
+        err = r.stderr.strip()
+        if is_rate_limited(err):
+            raise RateLimited(err)
+        raise RuntimeError(f"gh api graphql (items) failed: {err[:300]}")
+    data = json.loads(r.stdout)
+    if data.get("errors"):
+        msg = json.dumps(data["errors"])[:300]
+        if is_rate_limited(msg):
+            raise RateLimited(msg)
+        raise RuntimeError(f"gh api graphql (items) returned errors: {msg}")
+    return data["data"]["user"]["projectV2"]["items"]
+
+
+def _fetch_all_items_once():
+    items = []
+    cursor = None
+    total = None
+    while True:
+        conn = _one_page(cursor)
+        total = conn["totalCount"]
+        for node in conn["nodes"]:
+            fv = node.get("fieldValueByName")
+            ref = fv["number"] if fv else None
+            items.append({"id": node["id"], "createdAt": node["createdAt"], "ref": ref})
+        if conn["pageInfo"]["hasNextPage"]:
+            cursor = conn["pageInfo"]["endCursor"]
+        else:
+            break
+    if total is None or len(items) != total:
+        raise RuntimeError(
+            f"fetched {len(items)} items but project totalCount is {total} "
+            "-- refusing (paginate bug or a page dropped)")
+    return items, total
+
+
+def fetch_all_items():
+    return with_retry(_fetch_all_items_once)
+
+
+# Jeff 2026-08-29: "Go to 1000s". Refs live at 1001 and up so a T number is
+# never confused with a count, a page, or an old numbered list; --rebase moved
+# the original 1..710 to 1001..1710 in place (order preserved).
+FLOOR = 1000
+
+# --- Serialisation -----------------------------------------------------------
+# Ref assignment is read-max-then-write. The old guard re-read the max and bailed
+# if it moved, which is a time-of-check/time-of-use test: two writers can both
+# read the same max twice and both pass. That is what happened on 2026-09-10,
+# when fleet-sentinel filed two cards two seconds apart, both took T-2264, and
+# the nightly board export then died on the duplicate every night after.
+LOCK_PATH = os.path.expanduser("~/.claude/failures/.board-ref.lock")
+LOCK_WAIT_S = 180
+
+
+@contextlib.contextmanager
+def ref_lock(what):
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    fh = open(LOCK_PATH, "a+")
+    start = time.time()
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() - start > LOCK_WAIT_S:
+                fh.close()
+                sys.exit("board-ref: could not take the Ref lock within "
+                         f"{LOCK_WAIT_S}s ({what}); another writer is stuck")
+            time.sleep(0.4)
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+
+def fmt(n):
+    return f"T-{int(n)}"
+
+
+def next_ref(items):
+    refs = [int(it["ref"]) for it in items if it["ref"] is not None]
+    return max(refs + [FLOOR]) + 1
+
+
+def find_dupes(items):
+    refs = [int(it["ref"]) for it in items if it["ref"] is not None]
+    return sorted({r for r in refs if refs.count(r) > 1})
+
+
+def verify_unique(items):
+    dupes = find_dupes(items)
+    if dupes:
+        sys.exit(f"board-ref: DUPLICATE Ref values detected: {dupes}")
+
+
+def repair_dupes():
+    """Reassign the newer item of each duplicate pair to a fresh Ref.
+
+    A nightly job must not die on a condition the tool can fix. The OLDEST item
+    keeps the number, so anything already quoting that Ref stays correct, and
+    every later claimant moves to the top of the range and is logged loudly.
+    Returns the number of items moved.
+    """
+    items, _total = fetch_all_items()
+    dupes = find_dupes(items)
+    if not dupes:
+        return 0
+    by_ref = {}
+    for it in items:
+        if it["ref"] is not None:
+            by_ref.setdefault(int(it["ref"]), []).append(it)
+    top = next_ref(items) - 1
+    moved = 0
+    for d in dupes:
+        group = sorted(by_ref[d], key=lambda it: it["createdAt"])
+        for it in group[1:]:
+            top += 1
+            print(f"board-ref: REPAIR duplicate {fmt(d)} -- item {it['id']} "
+                  f"(created {it['createdAt']}) reassigned to {fmt(top)}")
+            set_ref(it["id"], top)
+            moved += 1
+            time.sleep(1.6)
+    return moved
+
+
+def _set_ref_once(item_id, n):
+    args = [GH, "project", "item-edit", "--id", item_id, "--field-id", REF_FIELD_ID,
+            "--project-id", PROJECT_ID, "--number", str(n)]
+    r = subprocess.run(args, capture_output=True, text=True, timeout=90)
+    if r.returncode != 0:
+        err = r.stderr.strip()
+        if is_rate_limited(err):
+            raise RateLimited(err)
+        raise RuntimeError(f"gh project item-edit (Ref={n} on {item_id}) failed: {err[:300]}")
+
+
+def set_ref(item_id, n):
+    with_retry(_set_ref_once, item_id, n)
+
+
+def cmd_next():
+    items, _total = fetch_all_items()
+    print(next_ref(items))
+
+
+def cmd_assign(item_id):
+    items, _total = fetch_all_items()
+    if not any(it["id"] == item_id for it in items):
+        sys.exit(f"board-ref: item {item_id} not found on the board")
+    n = next_ref(items)
+    # Collision guard: re-read the max immediately before writing; refuse if
+    # someone else (a concurrent decide/failtask) assigned a Ref meanwhile.
+    items2, _total2 = fetch_all_items()
+    n2 = next_ref(items2)
+    if n2 != n:
+        sys.exit(f"board-ref: max Ref moved between reads ({n} -> {n2}); "
+                 "another writer is active, retry")
+    set_ref(item_id, n)
+    print(fmt(n))
+
+
+def cmd_backfill():
+    items, total = fetch_all_items()
+    missing = [it for it in items if it["ref"] is None]
+    if not missing:
+        verify_unique(items)
+        print(f"board-ref: all {total} items already have a Ref; nothing to backfill")
+        return
+    missing.sort(key=lambda it: it["createdAt"])
+    print(f"board-ref: backfilling {len(missing)} of {total} items missing Ref")
+    max_ref = next_ref(items) - 1  # current max, 0 if none assigned yet
+    for idx, it in enumerate(missing, 1):
+        n = max_ref + 1
+        set_ref(it["id"], n)
+        max_ref = n
+        print(f"  [{idx}/{len(missing)}] {fmt(n)} -> {it['id']} (created {it['createdAt']})")
+        if idx < len(missing):
+            time.sleep(1.6)
+            if idx % 50 == 0:
+                print(f"board-ref: pausing 12s after {idx} assignments...")
+                time.sleep(12)
+
+    items_after, total_after = fetch_all_items()
+    still_missing = [it for it in items_after if it["ref"] is None]
+    verify_unique(items_after)
+    if still_missing:
+        sys.exit(f"board-ref: FAILED -- {len(still_missing)} of {total_after} "
+                 "items still missing a Ref after backfill")
+    top = next_ref(items_after) - 1
+    print(f"board-ref: backfill complete -- assigned {len(missing)}, "
+          f"{total_after} items total, Ref {FLOOR + 1}..{top} unique")
+
+
+def cmd_rebase(offset):
+    """Add OFFSET to every Ref still below the floor. Idempotent: a Ref already
+    at or above FLOOR + 1 is left alone, so a re-run after an interruption only
+    finishes the remainder. Refuses if any shifted value would collide."""
+    items, total = fetch_all_items()
+    low = [it for it in items if it["ref"] is not None and int(it["ref"]) <= FLOOR]
+    high = {int(it["ref"]) for it in items if it["ref"] is not None and int(it["ref"]) > FLOOR}
+    if not low:
+        verify_unique(items)
+        print(f"board-ref: no Ref at or below {FLOOR}; nothing to rebase")
+        return
+    clash = sorted(int(it["ref"]) + offset for it in low if int(it["ref"]) + offset in high)
+    if clash:
+        sys.exit(f"board-ref: rebase would collide with existing Refs {clash[:10]}")
+    low.sort(key=lambda it: -int(it["ref"]))
+    print(f"board-ref: rebasing {len(low)} of {total} items by +{offset}")
+    for idx, it in enumerate(low, 1):
+        n = int(it["ref"]) + offset
+        set_ref(it["id"], n)
+        print(f"  [{idx}/{len(low)}] T-{int(it['ref'])} -> {fmt(n)} ({it['id']})")
+        if idx < len(low):
+            time.sleep(1.6)
+            if idx % 50 == 0:
+                print(f"board-ref: pausing 12s after {idx} edits...")
+                time.sleep(12)
+    items_after, total_after = fetch_all_items()
+    verify_unique(items_after)
+    left = [it for it in items_after if it["ref"] is not None and int(it["ref"]) <= FLOOR]
+    if left:
+        sys.exit(f"board-ref: FAILED -- {len(left)} of {total_after} items still at or below {FLOOR}")
+    print(f"board-ref: rebase complete -- {total_after} items, Ref {FLOOR + 1}..{next_ref(items_after) - 1} unique")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="board-ref")
+    parser.add_argument("command", nargs="?", choices=["next", "assign"])
+    parser.add_argument("item_id", nargs="?")
+    parser.add_argument("--backfill", action="store_true")
+    parser.add_argument("--rebase", type=int, metavar="OFFSET",
+                        help="add OFFSET to every Ref at or below the floor (one-time move to the 1000s)")
+    args = parser.parse_args()
+
+    if args.rebase:
+        cmd_rebase(args.rebase)
+        return
+    if args.backfill:
+        with ref_lock("backfill"):
+            moved = repair_dupes()
+            if moved:
+                print(f"board-ref: repaired {moved} duplicate Ref value(s) before backfill")
+            cmd_backfill()
+        return
+    if args.command == "next":
+        cmd_next()
+    elif args.command == "assign":
+        if not args.item_id:
+            sys.exit("usage: board-ref assign <item_id>")
+        with ref_lock("assign"):
+            cmd_assign(args.item_id)
+    else:
+        sys.exit("usage: board-ref next | board-ref assign <item_id> | board-ref --backfill | board-ref --rebase 1000")
+
+
+if __name__ == "__main__":
+    main()
