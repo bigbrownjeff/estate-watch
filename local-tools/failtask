@@ -1,0 +1,573 @@
+#!/bin/bash
+# failtask — the failure-to-task reporter. Any recurring job/stage that fails calls this
+# so the failure lands on the todo board (GitHub Project #1, owner bigbrownjeff) instead
+# of waiting for an audit. Contract documented in ~/.claude/failures/README.md.
+#
+# Usage: failtask <project> "<title>" [--detail "..."] [--dedupe-key KEY] [--severity warn|error]
+#                  [--label FAILURE|"OPEN THREAD"|...]   (title prefix; default FAILURE, so
+#                  every existing caller is unchanged. Not every board card a job files is a
+#                  failure: the dangling-tasks lint files open threads.)
+#
+# Guarantees:
+#   - NEVER exits nonzero (a failure reporter must not break its caller).
+#   - Always appends a JSONL record to ~/.claude/failures/failures.jsonl.
+#   - Board item deduped by "failkey: KEY" stamped in item bodies, Done items included:
+#     an open match logs a recurrence, a Done-only match REOPENS that card.
+#   - If gh/network is down, record is queued (pending-board) and drained on the
+#     next successful invocation.
+#   - launchd-safe: no tty needed, gh/python3 resolved from absolute paths.
+#
+# Taxonomy (2026-08-27): Project is a single-select. The name passed as <project> is
+# mapped through ~/.claude/todos/project-aliases.json to a canonical option (unknown
+# names land on "other"), and Group is derived from the same map. The raw name is
+# always preserved in the card body as "project-raw: <name>".
+#
+# Status is set explicitly on create: the board's built-in "Item added to project"
+# workflow stopped stamping it after the 2026-08-27 Status option rebuild, and a card
+# with no Status is invisible to every saved view.
+#
+# FAILTASK_DRY_RUN=1 prints the gh write commands instead of running them (reads still run).
+set -u
+
+FT_PROJECT="${1:-}"; FT_TITLE="${2:-}"
+if [ "$FT_PROJECT" = "--drain" ]; then
+  # maintenance mode: only drain the pending-board queue, file nothing new
+  FT_PROJECT="__drain__"; FT_TITLE="__drain__"
+  set --
+else
+  if [ -z "$FT_PROJECT" ] || [ -z "$FT_TITLE" ]; then
+    echo "failtask: usage: failtask <project> \"<title>\" [--detail ...] [--dedupe-key KEY] [--severity warn|error]" >&2
+    exit 0   # even usage errors must not break the caller
+  fi
+  shift 2
+fi
+FT_DETAIL=""; FT_KEY=""; FT_SEVERITY="error"; FT_LABEL="FAILURE"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --detail)     FT_DETAIL="${2:-}"; shift 2 || shift ;;
+    --dedupe-key) FT_KEY="${2:-}"; shift 2 || shift ;;
+    --severity)   FT_SEVERITY="${2:-error}"; shift 2 || shift ;;
+    --label)      FT_LABEL="${2:-FAILURE}"; shift 2 || shift ;;
+    *) echo "failtask: ignoring unknown arg: $1" >&2; shift ;;
+  esac
+done
+export FT_PROJECT FT_TITLE FT_DETAIL FT_KEY FT_SEVERITY FT_LABEL
+
+PY=/usr/bin/python3
+[ -x "$PY" ] || PY="$(command -v python3 2>/dev/null || echo /usr/bin/python3)"
+
+"$PY" - <<'PYEOF'
+import contextlib, fcntl, hashlib, json, os, re, socket, subprocess, sys, time
+from datetime import datetime, timezone
+
+FAILDIR = os.path.expanduser("~/.claude/failures")
+JSONL   = os.path.join(FAILDIR, "failures.jsonl")
+PENDING = os.path.join(FAILDIR, "pending-board.jsonl")
+CACHE   = os.path.join(FAILDIR, "board-cache.json")
+CACHE_TTL = 600  # s — item-list is expensive GraphQL; burst callers (fleet-sentinel) share one fetch
+CACHE_VERSION = 2  # v2 caches ALL items (Done included); a v1 cache is ignored
+ALIAS_FILE = os.path.expanduser("~/.claude/todos/project-aliases.json")
+
+DRYRUN = os.environ.get("FAILTASK_DRY_RUN") == "1"
+
+# GitHub Project #1 "Jeff - All Projects" (owner bigbrownjeff) — IDs refreshed 2026-08-27.
+# Refresh with: gh project field-list 1 --owner bigbrownjeff --format json
+PROJECT_NUM   = "1"
+PROJECT_OWNER = "bigbrownjeff"
+PROJECT_ID    = "PVT_kwHOARM7z84Bd1kf"
+LIST_LIMIT    = "1000"
+
+# T-1742: the private repo real Issues live in. Single constant so every create
+# path (this file, decide, board-import-yaml.py) points at one name; override
+# for a dry run against a scratch repo via FAILTASK_BOARD_REPO. The repo does
+# not exist until E.1 step 0 runs — create_issue_and_add() falls back LOUDLY
+# to the DraftIssue path rather than hard-failing when it's absent.
+BOARD_REPO = os.environ.get("FAILTASK_BOARD_REPO", "bigbrownjeff/board")
+# Every card this tool creates sets Owner=agent unconditionally (see the
+# unconditional Owner edit in board_create below), so every one also gets the
+# `claude` label alongside `failure` (P2-13, gate review 2026-08-29 19:40:
+# issue #1 landed unlabelled).
+ISSUE_LABELS = ["failure", "claude"]
+ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)$")
+RATE_LIMIT_MARKERS = ("rate limit", "secondary", "submitted too quickly",
+                      "abuse detection", "unknown owner type")
+FIELD_PROJECT   = "PVTSSF_lAHOARM7z84Bd1kfzhgnHY4" # "Project" (single-select, 2026-08-27)
+FIELD_GROUP     = "PVTSSF_lAHOARM7z84Bd1kfzhgnHX8" # "Group" (single-select, 2026-08-27)
+FIELD_OWNER     = "PVTSSF_lAHOARM7z84Bd1kfzhYULfs" # "Owner" (single-select)
+OWNER_AGENT_OPT = "09f49cbd"                       # option "agent"
+FIELD_ESTIMATE  = "PVTF_lAHOARM7z84Bd1kfzhYULfk"   # "Estimate (min)" (number)
+FIELD_STATUS    = "PVTSSF_lAHOARM7z84Bd1kfzhYULaw" # "Status" (single-select)
+STATUS_TODO_OPT = "f75ad846"                       # option "Todo"
+
+def log(msg):
+    sys.stderr.write("failtask: %s\n" % msg)
+
+def append_jsonl(path, rec):
+    with open(path, "a") as f:
+        f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+
+def find_gh():
+    for c in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"):
+        if os.access(c, os.X_OK):
+            return c
+    from shutil import which
+    return which("gh")
+
+def gh(gh_bin, args, timeout=90):
+    return subprocess.run([gh_bin] + args, capture_output=True, text=True, timeout=timeout)
+
+def gh_write(gh_bin, args, timeout=90):
+    """A board-mutating gh call. In dry-run it is printed, not run."""
+    if DRYRUN:
+        log("DRY-RUN would run: gh " + " ".join(args))
+        class R: returncode = 0; stdout = '{"id":"DRYRUN-ITEM"}'; stderr = ""
+        return R()
+    return gh(gh_bin, args, timeout=timeout)
+
+# ------------------------------------------------------------------- taxonomy
+
+def load_taxonomy():
+    """{'aliases':{raw->canonical}, 'group_of':{canonical->Group},
+        'project_options':{canonical->optionId}, 'group_options':{Group->optionId}}"""
+    try:
+        with open(ALIAS_FILE) as f:
+            d = json.load(f)
+        for k in ("aliases", "group_of", "project_options", "group_options"):
+            if k not in d:
+                raise KeyError(k)
+        return d
+    except Exception as e:
+        log("alias map %s unreadable (%s) — Project/Group left unset" % (ALIAS_FILE, e))
+        return None
+
+def classify(tax, raw):
+    """(canonical_project, project_option_id, group_name, group_option_id) — never raises."""
+    if not tax:
+        return None, None, None, None
+    name = (raw or "").strip()
+    canon = tax["aliases"].get(name) or tax["aliases"].get(name.lower()) or "other"
+    popt = tax["project_options"].get(canon)
+    grp = tax["group_of"].get(canon)
+    gopt = tax["group_options"].get(grp) if grp else None
+    return canon, popt, grp, gopt
+
+# ---------------------------------------------------------------------- cache
+
+# --- Serialisation -----------------------------------------------------------
+# Dedupe is read-cache / check-key / create / write-cache. With no mutual
+# exclusion two concurrent callers both miss the same key and both file a card.
+# That is how family 56b01cfc collected 60 open cards, two sharing one failkey on
+# the same day (2026-09-11). board-ref had the same race and the same cure.
+# A failure must never be LOST to a stuck peer, so the lock has a ceiling and
+# proceeds loudly if it cannot be taken.
+LOCK_PATH = os.path.join(FAILDIR, ".failtask.lock")
+# 25s serialises a sentinel burst without stalling a CLI that reports failures.
+# It must also stay under the 120s subprocess timeout on the board-ref call below,
+# or a queued writer gets killed mid-assign.
+LOCK_WAIT_S = 25
+
+
+def take_board_lock():
+    """Hold an exclusive lock for the life of this process. Returns the handle
+    (kept referenced so it is not closed early) or None if it could not be had."""
+    try:
+        os.makedirs(FAILDIR, exist_ok=True)
+        fh = open(LOCK_PATH, "a+")
+    except Exception as e:
+        log("failtask: cannot open board lock (%s); proceeding without it" % e)
+        return None
+    start = time.time()
+    while time.time() - start <= LOCK_WAIT_S:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            time.sleep(0.3)
+    log("failtask: board lock busy for %ss; proceeding without it (dedupe may double-file)" % LOCK_WAIT_S)
+    fh.close()
+    return None
+
+
+def read_cache(max_age=None):
+    try:
+        st = os.stat(CACHE)
+        if max_age is not None and (time.time() - st.st_mtime) > max_age:
+            return None
+        with open(CACHE) as f:
+            d = json.load(f)
+        if d.get("v") != CACHE_VERSION:   # v1 held open items only — not usable for Done dedupe
+            return None
+        return d["items"]
+    except Exception:
+        return None
+
+def write_cache(items):
+    try:
+        with open(CACHE, "w") as f:
+            json.dump({"v": CACHE_VERSION, "items": items}, f)
+    except Exception as e:
+        log("board cache write failed: %s" % e)
+
+def fetch_items(gh_bin):
+    """List of ALL board items (Done included), or None if gh/network is down.
+    Cached for CACHE_TTL so burst callers don't burn the GraphQL rate limit;
+    created/reopened items are written back to the cache, keeping cross-process
+    dedupe correct."""
+    cached = read_cache(max_age=CACHE_TTL)
+    if cached is not None:
+        return cached
+    try:
+        r = gh(gh_bin, ["project", "item-list", PROJECT_NUM, "--owner", PROJECT_OWNER,
+                        "--format", "json", "--limit", LIST_LIMIT])
+        if r.returncode != 0:
+            log("gh item-list failed: %s" % r.stderr.strip()[:200])
+            stale = read_cache()  # any age beats nothing (e.g. rate-limited)
+            if stale is not None:
+                log("using stale board cache for dedupe")
+            return stale
+        items = json.loads(r.stdout).get("items", [])
+        write_cache(items)
+        return items
+    except Exception as e:
+        log("gh item-list error: %s" % e)
+        return read_cache()
+
+def cache_sync(items):
+    """Persist the in-memory item list so other processes see this run's writes."""
+    if DRYRUN:
+        return
+    cached = read_cache()
+    if cached is None:
+        return
+    by_id = {it.get("id"): it for it in items if it.get("id")}
+    out, seen = [], set()
+    for it in cached:
+        iid = it.get("id")
+        if iid in by_id:
+            out.append(by_id[iid]); seen.add(iid)
+        else:
+            out.append(it)
+    for iid, it in by_id.items():
+        if iid not in seen:
+            out.append(it)
+    write_cache(out)
+
+# ------------------------------------------------------------------ board ops
+
+def find_match(items, marker):
+    """(open_item, done_item) — first match of each kind for this failkey."""
+    open_hit = done_hit = None
+    for it in items:
+        body = (it.get("content") or {}).get("body", "") or ""
+        if marker not in body:
+            continue
+        if it.get("status") == "Done":
+            if done_hit is None:
+                done_hit = it
+        elif open_hit is None:
+            open_hit = it
+    return open_hit, done_hit
+
+def post_comment(gh_bin, content, body_text):
+    """Post body_text as a comment on the Issue behind `content` (a project
+    item's content dict). GraphQL addComment first; REST POST
+    /repos/{repo}/issues/{n}/comments as a fallback if GraphQL trips a
+    secondary-limit marker, since REST kept working through the 2026-08-27
+    trip. Returns True/False; never raises."""
+    content_id = content.get("id")
+    try:
+        if content_id:
+            query = ("mutation($id:ID!,$body:String!){addComment(input:"
+                      "{subjectId:$id,body:$body}){commentEdge{node{id}}}}")
+            r = gh_write(gh_bin, ["api", "graphql", "-f", "query=" + query,
+                                  "-f", "id=" + content_id, "-f", "body=" + body_text])
+            if r.returncode == 0:
+                return True
+            err = (r.stderr or "").lower()
+            if not any(m in err for m in RATE_LIMIT_MARKERS):
+                log("addComment failed (no REST fallback, not a rate marker): %s"
+                    % r.stderr.strip()[:200])
+                return False
+            log("addComment hit a rate-limit marker, falling back to REST: %s"
+                % r.stderr.strip()[:200])
+        number = content.get("number")
+        if not number:
+            log("comment fallback: content has no id and no issue number, cannot post")
+            return False
+        m = ISSUE_URL_RE.match(content.get("url") or "")
+        repo = m.group(1) if m else BOARD_REPO
+        r = gh_write(gh_bin, ["api", "-X", "POST",
+                              "repos/%s/issues/%s/comments" % (repo, number),
+                              "-f", "body=" + body_text])
+        if r.returncode != 0:
+            log("REST comment fallback failed: %s" % r.stderr.strip()[:200])
+            return False
+        return True
+    except Exception as e:
+        log("post_comment error: %s" % e)
+        return False
+
+def reopen(gh_bin, gh_item, rec):
+    """A Done card matched this failkey: reopen it and stamp the recurrence.
+
+    An Issue-backed item gets the stamp as a comment (addComment / REST),
+    which is strictly better than a body edit: no read-modify-write, and it
+    is the notification this migration exists for. A DraftIssue item keeps
+    the original body-append path unchanged, so the tool is correct on a
+    board where the two kinds coexist."""
+    content = gh_item.get("content") or {}
+    body = content.get("body", "") or ""
+    title = content.get("title") or gh_item.get("title") or ""
+    content_type = content.get("type")
+    stamp = "recurred: %s" % rec["ts"]
+    new_body = None
+    try:
+        if content_type == "DraftIssue":
+            draft_id = content.get("id")
+            new_body = (body.rstrip("\n") + "\n" + stamp) if body else stamp
+            args = ["project", "item-edit", "--id", draft_id, "--body", new_body]
+            if title:
+                args += ["--title", title]
+            r = gh_write(gh_bin, args)
+            if r.returncode != 0:
+                log("reopen body edit failed: %s" % r.stderr.strip()[:200])
+                return False
+        elif content_type == "Issue":
+            if not post_comment(gh_bin, content, stamp):
+                log("reopen comment failed for issue %s — Status will still be flipped"
+                    % (content.get("number") or gh_item.get("id")))
+        else:
+            log("reopen: item %s has unknown content type %r — Status flipped, no stamp"
+                % (gh_item.get("id"), content_type))
+        r = gh_write(gh_bin, ["project", "item-edit", "--project-id", PROJECT_ID,
+                              "--id", gh_item["id"], "--field-id", FIELD_STATUS,
+                              "--single-select-option-id", STATUS_TODO_OPT])
+        if r.returncode != 0:
+            log("reopen status edit failed: %s" % r.stderr.strip()[:200])
+            return False
+    except Exception as e:
+        log("reopen error: %s" % e)
+        return False
+    if not DRYRUN:
+        gh_item["status"] = "Todo"
+        if content_type == "DraftIssue":
+            content["body"] = new_body
+            gh_item["content"] = content
+    return True
+
+def create_issue_and_add(gh_bin, title, body):
+    """(item_id, content_type) via gh issue create --repo BOARD_REPO + project
+    item-add, or (None, None) on total failure. Falls back LOUDLY to the old
+    `item-create` DraftIssue path if BOARD_REPO doesn't exist yet or the
+    create call fails for any reason (missing repo, 404, network, rate
+    limit): a failtask that hard-fails is worse than a card landing as a
+    draft, because every watchdog in the estate files through this tool.
+    Applies ISSUE_LABELS on create; a label-only failure (labels missing,
+    e.g. run before C.2's label setup) retries once without labels rather
+    than failing the whole create."""
+    r = None
+    label_args = []
+    for lbl in ISSUE_LABELS:
+        label_args += ["--label", lbl]
+    try:
+        r = gh_write(gh_bin, ["issue", "create", "--repo", BOARD_REPO,
+                              "--title", title, "--body", body] + label_args)
+        if r.returncode != 0 and "label" in (r.stderr or "").lower():
+            log("issue create with %s failed, retrying without labels: %s"
+                % (label_args, r.stderr.strip()[:200]))
+            r = gh_write(gh_bin, ["issue", "create", "--repo", BOARD_REPO,
+                                  "--title", title, "--body", body])
+    except Exception as e:
+        log("BOARD REPO %s UNAVAILABLE — falling back to draft item-create: %s" % (BOARD_REPO, e))
+    if r is not None and r.returncode == 0:
+        # The issue EXISTS from here on. Nothing below may fall through to
+        # item-create: an unparsable url or item-add payload would then file
+        # the same card twice, once as an issue and once as a draft.
+        try:
+            issue_url = ("https://github.com/%s/issues/DRYRUN" % BOARD_REPO if DRYRUN
+                         else r.stdout.strip().splitlines()[-1].strip())
+            r2 = gh_write(gh_bin, ["project", "item-add", PROJECT_NUM, "--owner", PROJECT_OWNER,
+                                   "--url", issue_url, "--format", "json"])
+            if r2.returncode == 0:
+                return json.loads(r2.stdout)["id"], "Issue"
+            log("item-add after issue create failed (issue %s now orphaned from the board): %s"
+                % (issue_url, r2.stderr.strip()[:200]))
+        except Exception as e:
+            log("issue %s was created but could not be added to the board (NOT re-filed "
+                "as a draft, to avoid a double file): %s" % (BOARD_REPO, e))
+        return None, None
+    if r is not None:
+        reason = r.stderr.strip()[:200] or "gh issue create returned nonzero with no stderr"
+        log("BOARD REPO %s UNAVAILABLE — falling back to draft item-create: %s" % (BOARD_REPO, reason))
+    try:
+        r = gh_write(gh_bin, ["project", "item-create", PROJECT_NUM, "--owner", PROJECT_OWNER,
+                              "--title", title, "--body", body, "--format", "json"])
+        if r.returncode != 0:
+            log("item-create fallback failed: %s" % r.stderr.strip()[:200])
+            return None, None
+        return json.loads(r.stdout)["id"], "DraftIssue"
+    except Exception as e:
+        log("item-create fallback error: %s" % e)
+        return None, None
+
+def board_create(gh_bin, rec, items, tax):
+    """('dupe'|'reopened'|'created'|'failed', item_id_or_None)."""
+    marker = "failkey: %s" % rec["key"]
+    open_hit, done_hit = find_match(items, marker)
+    if open_hit is not None:
+        # No board write on this path, by design. It is the highest-frequency
+        # path in the estate (every watchdog re-fires through it on every
+        # tick of a still-broken thing), and one comment per tick is both a
+        # notification storm and mutation quota spent against the same
+        # secondary limit the 2026-08-27 trip hit. The recurrence is already
+        # recorded in failures.jsonl; the board only needs to hear about a
+        # card that was Done and came back (reopen(), which does comment).
+        return "dupe", open_hit.get("id")
+    if done_hit is not None:
+        if reopen(gh_bin, done_hit, rec):
+            return "reopened", done_hit.get("id")
+        return "failed", None
+
+    canon, popt, grp, gopt = classify(tax, rec["project"])
+    title = "[%s] %s: %s" % (canon or rec["project"], rec.get("label") or "FAILURE", rec["title"])
+    body_parts = []
+    if rec.get("detail"):
+        body_parts.append(rec["detail"])
+    body_parts.append("filed: %s\nsource: failtask@%s\nseverity: %s\nproject-raw: %s\n%s"
+                      % (rec["ts"], rec["host"], rec["severity"], rec["project"], marker))
+    body = "\n\n".join(body_parts)
+    item_id, content_type = create_issue_and_add(gh_bin, title, body)
+    if item_id is None:
+        return "failed", None
+
+    edits = [(["--field-id", FIELD_STATUS, "--single-select-option-id", STATUS_TODO_OPT], "Status")]
+    if popt:
+        edits.append((["--field-id", FIELD_PROJECT, "--single-select-option-id", popt], "Project"))
+    if gopt:
+        edits.append((["--field-id", FIELD_GROUP, "--single-select-option-id", gopt], "Group"))
+    edits.append((["--field-id", FIELD_OWNER, "--single-select-option-id", OWNER_AGENT_OPT], "Owner"))
+    edits.append((["--field-id", FIELD_ESTIMATE, "--number", "30"], "Estimate"))
+    for extra, name in edits:
+        try:
+            r = gh_write(gh_bin, ["project", "item-edit", "--project-id", PROJECT_ID,
+                                  "--id", item_id] + extra)
+            if r.returncode != 0:
+                log("item-edit %s failed (item exists anyway): %s" % (name, r.stderr.strip()[:150]))
+        except Exception as e:
+            log("item-edit %s error: %s" % (name, e))
+    # A friendly Ref (T-NNN) too, so a filed failure gets one like everything
+    # else on the board. board-ref has no dry-run mode of its own, so it is
+    # never called for real under FAILTASK_DRY_RUN.
+    if DRYRUN:
+        log("DRY-RUN would run: board-ref assign %s" % item_id)
+    else:
+        try:
+            r = subprocess.run(["/Users/jeffpinto/.claude/bin/board-ref", "assign", item_id],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                log("board-ref assign failed (item exists anyway): %s" % r.stderr.strip()[:200])
+        except Exception as e:
+            log("board-ref assign error: %s" % e)
+    # so later records — same invocation AND other processes via the cache — dedupe against it
+    if not DRYRUN:
+        items.append({"status": "Todo",
+                      "content": {"title": title, "body": body, "type": content_type},
+                      "id": item_id})
+    return "created", item_id
+
+# ----------------------------------------------------------------------- main
+
+def main():
+    os.makedirs(FAILDIR, exist_ok=True)
+    project  = os.environ["FT_PROJECT"]
+    title    = os.environ["FT_TITLE"]
+    drain_only = (project == "__drain__")
+    detail   = os.environ.get("FT_DETAIL", "")
+    severity = os.environ.get("FT_SEVERITY") or "error"
+    key      = os.environ.get("FT_KEY", "")
+    if not key:
+        key = hashlib.sha256((project + "\x00" + title).encode()).hexdigest()[:16]
+    rec = {
+        "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "project": project, "title": title, "detail": detail,
+        "key": key, "severity": severity, "label": os.environ.get("FT_LABEL") or "FAILURE",
+        "host": socket.gethostname(),
+    }
+
+    gh_bin = find_gh()
+    tax = load_taxonomy()
+    # held until this process exits, which is the whole dedupe window
+    _board_lock = take_board_lock()  # noqa: F841
+    items = fetch_items(gh_bin) if gh_bin else None
+
+    if items is None:
+        if drain_only:
+            log("board unreachable — nothing drained")
+            return
+        rec["pending_board"] = True
+        append_jsonl(JSONL, rec)
+        append_jsonl(PENDING, rec)
+        log("BOARD UNREACHABLE — logged [%s] %s to %s and queued (pending-board)"
+            % (project, title, JSONL))
+        return
+
+    # Drain any previously queued records first.
+    if os.path.exists(PENDING):
+        queued, leftovers = [], []
+        try:
+            with open(PENDING) as f:
+                queued = [json.loads(l) for l in f if l.strip()]
+        except Exception as e:
+            log("pending queue unreadable (%s) — leaving it" % e)
+        for q in queued:
+            outcome, _ = board_create(gh_bin, q, items, tax)
+            if outcome == "failed":
+                leftovers.append(q)
+            else:
+                log("drained pending [%s] %s -> %s" % (q.get("project"), q.get("title"), outcome))
+        try:
+            if leftovers:
+                with open(PENDING, "w") as f:
+                    for q in leftovers:
+                        f.write(json.dumps(q, separators=(",", ":")) + "\n")
+            elif queued:
+                os.remove(PENDING)
+        except Exception as e:
+            log("pending queue rewrite failed: %s" % e)
+
+    if drain_only:
+        cache_sync(items)
+        log("drain complete")
+        return
+
+    outcome, item_id = board_create(gh_bin, rec, items, tax)
+    cache_sync(items)
+    if outcome == "dupe":
+        rec["dedupe_hit"] = True   # the JSONL is the recurrence record
+        append_jsonl(JSONL, rec)
+        log("SEEN AGAIN — open board item exists for failkey %s; [%s] %s recurrence logged to JSONL"
+            % (key, project, title))
+    elif outcome == "reopened":
+        rec["board_item"] = item_id
+        rec["reopened"] = True
+        append_jsonl(JSONL, rec)
+        log("REOPENED board item %s (was Done) for failkey %s; [%s] %s"
+            % (item_id, key, project, title))
+    elif outcome == "created":
+        rec["board_item"] = item_id
+        append_jsonl(JSONL, rec)
+        log("FILED [%s] %s: %s -> board item %s (failkey %s)"
+            % (project, os.environ.get("FT_LABEL") or "FAILURE", title, item_id, key))
+    else:
+        rec["pending_board"] = True
+        append_jsonl(JSONL, rec)
+        append_jsonl(PENDING, rec)
+        log("board create FAILED — logged [%s] %s and queued (pending-board)" % (project, title))
+
+try:
+    main()
+except Exception as e:
+    sys.stderr.write("failtask: INTERNAL ERROR (still exiting 0): %r\n" % e)
+sys.exit(0)
+PYEOF
+exit 0
