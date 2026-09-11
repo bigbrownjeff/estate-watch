@@ -397,7 +397,11 @@ def find_breaches(agg, cfg, hours):
         aid = info.get("agent_id") or akey.split("::")[-1]
         out.append({
             "project": cfg["project"], "severity": "error",
-            "key": f"burn:agent:{aid}:{day}",
+            # An agent id is unique and a finished agent's turn count never changes
+            # again, so day-scoping the key re-filed the same completed finding on
+            # every later day it was observed: three identical cards for one agent
+            # (2026-09-11 walk). Rollups below stay day-scoped; they really are daily.
+            "key": f"burn:agent:{aid}",
             "title": f"burn: agent ran {b['tool_turns']:,} tool turns (cap {cap}) — {human(total(b))} tokens",
             "detail": (
                 f"Agent {aid} ran {b['tool_turns']:,} tool turns / {b['turns']:,} assistant turns "
@@ -447,7 +451,7 @@ def find_breaches(agg, cfg, hours):
         lab = agg["session_label"].get((prof, sid), "(subagent-only / unlabeled)")
         out.append({
             "project": cfg["project"], "severity": "error",
-            "key": f"burn:session:{sid}:{day}",
+            "key": f"burn:session:{sid}",
             "title": f"burn: session {sid[:8]} at {human(t)} tokens (cap {human(sess_cap)}/{hours:.0f}h)",
             "detail": (
                 f"Session {sid} ({prof}) burned {human(t)} tokens across {b['turns']:,} "
