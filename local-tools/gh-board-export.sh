@@ -101,14 +101,6 @@ case "$VAULT" in ""|"/"|"/*") die "refusing to use VAULT='$VAULT'";; esac
 DEST="$VAULT/$DATE"
 mkdir -p "$DEST" || die "cannot create $DEST"
 
-# ---- 0. board-ref backfill (before capture, so the export carries Refs) -----------
-BOARD_REF="${GH_BOARD_REF_BIN:-$HOME/.claude/bin/board-ref}"
-if [ -x "$BOARD_REF" ]; then
-  "$BOARD_REF" --backfill >>"$LOG" 2>&1 || die "board-ref --backfill exited nonzero"
-else
-  die "board-ref not found or not executable at $BOARD_REF"
-fi
-
 # ---- 1. items.json --------------------------------------------------------------
 # --limit is a hard cap, not a page size: at 1000 the board (1,143 items on
 # 2026-09-09) was silently truncated and every sweep read a short list.
@@ -125,6 +117,21 @@ TOTAL_COUNT=$(python3 -c "import json; print(json.load(open('$DEST/items.json'))
   || die "cannot read totalCount"
 [ "$ITEM_COUNT" -eq "$TOTAL_COUNT" ] \
   || die "items.json is TRUNCATED: $ITEM_COUNT of $TOTAL_COUNT items (raise --limit)"
+
+# ---- 0. board-ref backfill (after capture, non-fatal) ------------------------------
+# board-ref does its own full GraphQL walk of the board (a second full walk per
+# night, same cost as the item-list above), so it runs after items.json is safely
+# captured, not before: a failed backfill (duplicate Ref, rate limit — both hit in
+# practice, see ~/.claude/failures/gh-board-export.log 2026-09-11/09-13) must not
+# cost the whole export. New cards just pick up their Ref on the next run.
+# Creak ledger 31, ~/Projects/_hygiene/creak-ledger.md.
+BOARD_REF="${GH_BOARD_REF_BIN:-$HOME/.claude/bin/board-ref}"
+if [ -x "$BOARD_REF" ]; then
+  "$BOARD_REF" --backfill >>"$LOG" 2>&1 \
+    || echo "gh-board-export: WARNING board-ref --backfill exited nonzero; export continues, Refs for new cards land next run" | tee -a "$LOG"
+else
+  echo "gh-board-export: WARNING board-ref not found or not executable at $BOARD_REF; export continues, Refs for new cards land next run" | tee -a "$LOG"
+fi
 
 # ---- 2. fields.json ---------------------------------------------------------------
 gh project field-list "$NUMBER" --owner "$OWNER" --format json \
