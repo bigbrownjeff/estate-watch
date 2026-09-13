@@ -68,7 +68,7 @@ def description_of(memdir, target):
     return ""
 
 
-def render_lines(sections, seen, missing, memdir, keep, hook_cap, pack_chars, title_line):
+def render_lines(sections, seen, missing, memdir, keep, hook_cap, pack_chars, title_line, title_cap=0):
     out = [title_line, ""]
     for header, targets in sections:
         kept = [t for t in targets if t not in missing]
@@ -80,6 +80,8 @@ def render_lines(sections, seen, missing, memdir, keep, hook_cap, pack_chars, ti
         if cap:
             for t in kept:
                 title, hook = seen[t]
+                if title_cap and len(title) > title_cap:
+                    title = trim(title, title_cap)
                 if not hook:
                     hook = description_of(memdir, t)
                 h = trim(hook, cap)
@@ -87,7 +89,10 @@ def render_lines(sections, seen, missing, memdir, keep, hook_cap, pack_chars, ti
         else:
             line = ""
             for t in kept:
-                item = "[%s](%s)" % (seen[t][0], t)
+                title = seen[t][0]
+                if title_cap and len(title) > title_cap:
+                    title = trim(title, title_cap)
+                item = "[%s](%s)" % (title, t)
                 if line and len(line) + 3 + len(item) > pack_chars:
                     out.append("- " + line); line = item
                 else:
@@ -130,11 +135,28 @@ def rebuild(path, hooks_for, hook_cap, limit, write, max_lines=195, pack_chars=1
     # Budget fallback: hooks go first, section by section, before anything else.
     if len(text) > limit or text.count("\n") > max_lines:
         alt = text
+        # Then pack more entries per line: the line cap bites before the
+        # character cap once every hook is gone (2026-09-13: 379 entries with
+        # no hooks still made 223 lines at 170 chars per line).
+        fell_back = False
         for narrower in ("binding", "^$"):
-            alt = "\n".join(render_lines(sections, seen, missing, memdir, re.compile(narrower, re.I), hook_cap, pack_chars, title_line)).rstrip("\n") + "\n"
-            if len(alt) <= limit and alt.count("\n") <= max_lines:
-                print("hooks narrowed to /%s/ to fit the budget" % narrower)
+            for pack in (pack_chars, 220, 280, 360):
+                alt = "\n".join(render_lines(sections, seen, missing, memdir, re.compile(narrower, re.I), hook_cap, pack, title_line)).rstrip("\n") + "\n"
+                if len(alt) <= limit and alt.count("\n") <= max_lines:
+                    print("hooks narrowed to /%s/, %d chars per line, to fit the budget" % (narrower, pack))
+                    fell_back = True
+                    break
+            if fell_back:
                 break
+        # Last resort: shorten the titles themselves. With 380 memories the
+        # entries alone overflow 24K, and the title is the only part of an
+        # entry that is not the link.
+        if not fell_back:
+            for tcap in (32, 26, 20):
+                alt = "\n".join(render_lines(sections, seen, missing, memdir, re.compile("^$"), hook_cap, 360, title_line, tcap)).rstrip("\n") + "\n"
+                if len(alt) <= limit and alt.count("\n") <= max_lines:
+                    print("hooks dropped and titles capped at %d chars to fit the budget" % tcap)
+                    break
         text = alt
     before = "".join(l + "\n" for l in lines)
     print("%s: %d lines / %d chars -> %d lines / %d chars; %d entries, %d dead link(s) dropped%s"
