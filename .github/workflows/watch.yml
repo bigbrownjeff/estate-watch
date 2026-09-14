@@ -126,6 +126,9 @@ jobs:
           check_url "retired:descript"       "https://descript-e3c.pages.dev/" public "" "Not available"
           check_url "retired:idesign"        "https://idesign-4ui.pages.dev/" public "" "Not available"
           check_url "bridgetheiep"         "https://bridgetheiep.pages.dev/" public "" "Bridge the IEP"
+          # Custom domain live 2026-09-14; bridge-the-iep.com must 301 here (check_url follows redirects, so the marker proves the chain).
+          check_url "bridgetheiep.com"     "https://bridgetheiep.com/" public "" "Bridge the IEP"
+          check_url "bridge-the-iep.com"   "https://bridge-the-iep.com/" public "" "Bridge the IEP"
           check_url "loop-lab"             "https://loop-lab.jeffpinto.com/" public "" "Loop Lab"
           check_url "solar-sizing"         "https://bigbrownjeff.github.io/solar-sizing/" public "" "Honest solar sizing"
           check_url "line-judge-drift"     "https://line-judge-drift-f1d8e1.jeffpinto.com/" public "" "An AI line judge that drifts"
