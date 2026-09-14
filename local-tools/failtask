@@ -208,11 +208,25 @@ def write_cache(items):
     except Exception as e:
         log("board cache write failed: %s" % e)
 
-def fetch_items(gh_bin):
+def fetch_items(gh_bin, known_key=None):
     """List of ALL board items (Done included), or None if gh/network is down.
     Cached for CACHE_TTL so burst callers don't burn the GraphQL rate limit;
     created/reopened items are written back to the cache, keeping cross-process
-    dedupe correct."""
+    dedupe correct.
+
+    A dedupe HIT never refetches: if any-age cache already holds an OPEN card
+    for known_key, the answer is "SEEN AGAIN" whatever the live board says, so
+    the walk is wasted. (2026-09-14: console-drain filed the same key every
+    10 min and each filing re-walked the 1,346-card board once the 600 s TTL
+    lapsed, six GraphQL walks an hour all night; gh-board-export at 03:20 found
+    the hour's budget already gone three nights out of four. Creak ledger 32.)"""
+    if known_key:
+        any_age = read_cache()
+        if any_age is not None:
+            open_hit, _ = find_match(any_age, "failkey: %s" % known_key)
+            if open_hit is not None:
+                log("dedupe hit on cached board for failkey %s; no fetch" % known_key)
+                return any_age
     cached = read_cache(max_age=CACHE_TTL)
     if cached is not None:
         return cached
@@ -498,7 +512,7 @@ def main():
     tax = load_taxonomy()
     # held until this process exits, which is the whole dedupe window
     _board_lock = take_board_lock()  # noqa: F841
-    items = fetch_items(gh_bin) if gh_bin else None
+    items = fetch_items(gh_bin, None if drain_only else rec["key"]) if gh_bin else None
 
     if items is None:
         if drain_only:
