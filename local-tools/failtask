@@ -75,7 +75,7 @@ DRYRUN = os.environ.get("FAILTASK_DRY_RUN") == "1"
 PROJECT_NUM   = "1"
 PROJECT_OWNER = "bigbrownjeff"
 PROJECT_ID    = "PVT_kwHOARM7z84Bd1kf"
-LIST_LIMIT    = "1000"
+LIST_LIMIT    = "5000"   # a hard cap, not a page size: at 1000 the 1,391-card board was silently short (ledger 33)
 
 # T-1742: the private repo real Issues live in. Single constant so every create
 # path (this file, decide, board-import-yaml.py) points at one name; override
@@ -239,7 +239,17 @@ def fetch_items(gh_bin, known_key=None):
             if stale is not None:
                 log("using stale board cache for dedupe")
             return stale
-        items = json.loads(r.stdout).get("items", [])
+        payload = json.loads(r.stdout)
+        items = payload.get("items", [])
+        total = payload.get("totalCount")
+        if isinstance(total, int) and total > len(items):
+            # A short list makes every dedupe blind to the newest cards (that is how
+            # 31 duplicate cards were filed 09-13/14); say so and fall back.
+            log("gh item-list TRUNCATED: %d of %d items (raise LIST_LIMIT)" % (len(items), total))
+            stale = read_cache()
+            if stale is not None and len(stale) >= len(items):
+                log("using the fuller board cache for dedupe")
+                return stale
         write_cache(items)
         return items
     except Exception as e:
