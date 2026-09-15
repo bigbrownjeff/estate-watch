@@ -28,6 +28,8 @@ rows=(
   "local-tools/morning-digest.py|$HOME/.claude/bin/morning-digest.py|0755"
   "local-tools/worktree-janitor.py|$HOME/.claude/bin/worktree-janitor.py|0755"
   "local-tools/dangling-tasks.py|$HOME/.claude/bin/dangling-tasks.py|0755"
+  "local-tools/prompt-maestro-weekly.sh|$HOME/.claude/bin/prompt-maestro-weekly.sh|0755"
+  "local-tools/tests/test_prompt_maestro_weekly.sh|$HOME/.claude/bin/tests/test_prompt_maestro_weekly.sh|0755"
 )
 
 case "$mode" in
