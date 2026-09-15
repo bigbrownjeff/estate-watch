@@ -10,9 +10,17 @@ Four profiles keep independent memory stores that drift:
 
 Each store is one-fact-per-file markdown with YAML-ish frontmatter, plus a
 MEMORY.md index that is loaded into every session of that profile. A doctrine
-rule learned in one profile is invisible to the other two until someone copies
-it by hand (2026-08-26: persona-check-is-rule-zero, hand-copied three ways, and
-the copies were not even byte-identical).
+rule learned in one profile is invisible to the others until someone copies
+it by hand (2026-08-26: persona-check-is-rule-zero, hand-copied three ways,
+and the copies were not even byte-identical. 2026-09-06 MEM-2: claudeux was
+missing from PROFILES entirely, so three feedback memories the binding
+global CLAUDE.md cites by identifier -- status-updates-exec-summary-20min,
+needs-you-is-standalone, repeat-shortfall-means-automate -- existed only in
+claudeux and were invisible to every other profile's sync).
+
+Registered profiles are asserted complete by `--check`: any ~/.claude* store
+directory (main included) that carries a memory index but isn't in PROFILES
+is a registry gap, not silent -- see `unregistered_profile_dirs()`.
 
 WHAT SYNCS ("doctrine-grade") — derived by reading all 134 memories, not assumed:
 
@@ -40,18 +48,48 @@ CONFLICT DOCTRINE — never trust a version header, only content:
   20KB of body missing on one side). So `modified` is reported as evidence for
   a human and is NEVER used to pick a winner. The ladder is:
 
-    1. identical sha1                       -> no-op
-    2. absent on a target                   -> ADD  (provably lossless)
-    3. one side is a strict line-superset   -> PROMOTE (provably lossless:
-                                               every line of the loser survives)
-    4. anything else                        -> CONFLICT. No write, ever.
-                                               Quarantined + filed to the board.
+    1. identical sha1                        -> no-op
+    2. absent on a target                    -> ADD  (provably lossless)
+    3. one side is a strict, ORDER-PRESERVING
+       superset of another                   -> PROMOTE (provably lossless:
+                                                every line of the loser
+                                                survives, in order, and no
+                                                inserted line negates one it
+                                                keeps)
+    4. anything else                         -> CONFLICT. No write, ever.
+                                                Quarantined + filed to the
+                                                board.
 
   Only 2 and 3 are applied unattended. Rule 4 is the unattended-judgment ban:
   an automated process may propagate an addition, never adjudicate ambiguity.
+  superset() (2026-09-06, MEM-4) checks more than "every line of b is in a":
+  it requires the extra lines to be pure insertions in a's own line order
+  (difflib opcodes equal/insert only -- a reordered or edited copy is NOT a
+  superset in either direction), and it refuses to promote an insertion that
+  negation-flips a line it would otherwise keep ("Do not publish" + append
+  "Publish automatically" is a CONFLICT, not a promotion).
+
+  A memory that is doctrine-grade (eligible) in >=1 store and present with
+  DIFFERENT content but marked ineligible (sync: false, or type: project /
+  reference without an override) elsewhere is reported as a `divergent-
+  ineligible` NOTE, never silently "clean" and never promoted into the store
+  that opted out.
 
   Deletions never propagate. A file present in >=1 store is pushed to all; to
   retire a doctrine memory everywhere use `--retire <name>`.
+
+  Index hygiene (2026-09-06, MEM-3): `--check` fails (exit >=1) on any index
+  link with no corresponding file in the same store ("dangling"), and on any
+  doctrine-grade memory present in a store with no index entry there
+  ("unindexed") -- checked PER REGISTERED PROFILE, not main only (CD-R4-1:
+  claudette alone carried 7 dangling links the first pass missed by checking
+  main and generalizing). It WARNS (does not fail) when a profile's
+  MEMORY.md exceeds the ~24,000-byte preload budget, listing the entries
+  that sit past the boundary. Applying the sync itself only ever touches the
+  ' · '-delimited segment belonging to the memory being synced on a
+  multi-link index line -- never a sibling memory's link riding the same
+  line (MEM-3: main's index used to carry three stale sibling segments this
+  way onto claudine-only files).
 
 Usage:
   memory-sync                 dry run: print the plan, write nothing (default)
@@ -60,6 +98,10 @@ Usage:
   memory-sync --scheduled     launchd mode: apply lossless, failtask the rest
   memory-sync --retire NAME   remove a memory + its index line from all stores
   memory-sync --verbose       show per-file evidence
+
+Env:
+  MEMORY_SYNC_HOME  overrides ~ for every store path (migration previews /
+                    tests only -- never set this against a live profile).
 
 Exit codes: 0 clean/applied · 1 drift present (--check) · 2 conflicts present
 """
@@ -72,12 +114,13 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
 import tempfile
 
-HOME = os.path.expanduser("~")
+HOME = os.environ.get("MEMORY_SYNC_HOME") or os.path.expanduser("~")
 REL = os.path.join("projects", "-Users-jeffpinto", "memory")
 PROFILES = {
     "main": os.path.join(HOME, ".claude"),
@@ -91,8 +134,6 @@ PROFILES = {
     "claudeux": os.path.join(HOME, ".claude-claudeux"),
 }
 VAULT = os.path.join(HOME, "data-vaults", "claude-memory")
-SNAPSHOTS = os.path.join(VAULT, "snapshots")
-QUARANTINE = os.path.join(VAULT, "conflicts")
 LOCKDIR = os.path.join(HOME, ".claude", "failures", ".memory-sync.lockdir")
 FAILTASK = os.path.join(HOME, ".claude", "bin", "failtask")
 INDEX = "MEMORY.md"
@@ -101,6 +142,18 @@ SYNC_TYPES = {"feedback", "user"}
 # A file touched within this many seconds may be mid-write by a live session.
 FRESH_SECONDS = 120
 SNAPSHOT_KEEP = 30
+LOCK_STALE_SECONDS = 1800
+BYTE_BUDGET = 24000
+
+# MEM-4(b): negation-flip keyword list. NEGATORS mark "this stops/forbids";
+# ASSERTORS mark "this now happens/always happens". An inserted line carrying
+# one polarity that overlaps in topic with a kept line carrying the other is
+# a semantic conflict, not a lossless append.
+NEGATORS = ["not", "never", "no longer", "stop", "do not", "don't",
+            "rescind", "superseded", "deprecated"]
+ASSERTORS = ["automatically", "always"]
+KEYWORDS = NEGATORS + ASSERTORS
+_STOPWORDS = {"the", "and", "for", "with", "this", "that", "from", "into"}
 
 
 # ---------------------------------------------------------------- store model
@@ -173,16 +226,87 @@ def scan():
     return store
 
 
+def unregistered_profile_dirs(home=None):
+    """~/.claude* directories carrying a memory index that PROFILES doesn't
+    know about (MEM-2: this is exactly how claudeux went missing)."""
+    home = home if home is not None else HOME
+    known = set(PROFILES.values())
+    out = []
+    if not os.path.isdir(home):
+        return out
+    for entry in sorted(os.listdir(home)):
+        if entry != ".claude" and not entry.startswith(".claude-"):
+            continue
+        d = os.path.join(home, entry)
+        if not os.path.isdir(d) or d in known:
+            continue
+        if os.path.exists(os.path.join(d, REL, INDEX)):
+            out.append(d)
+    return out
+
+
 # ------------------------------------------------------------ merge decisions
 
+def _keywords_in(line):
+    low = line.lower()
+    return {k for k in KEYWORDS if k in low}
+
+
+def _topic_words(line):
+    low = re.sub(r"[^a-z0-9\s]", " ", line.lower())
+    return {w for w in low.split()
+            if len(w) > 2 and w not in KEYWORDS and w not in _STOPWORDS}
+
+
+def negation_conflict(existing_lines, inserted_lines):
+    """The first (existing_line, inserted_line) pair where an inserted line
+    flips the polarity (NEGATORS vs ASSERTORS) of an existing line it shares
+    topic words with, or None. Naming the offending existing line is what the
+    plan prints for triage."""
+    for ins in inserted_lines:
+        ins_kw = _keywords_in(ins)
+        if not ins_kw:
+            continue
+        ins_topic = _topic_words(ins)
+        if not ins_topic:
+            continue
+        for ex in existing_lines:
+            ex_kw = _keywords_in(ex)
+            if not ex_kw:
+                continue
+            flipped = bool(ex_kw & set(NEGATORS)) != bool(ins_kw & set(NEGATORS))
+            if not flipped:
+                continue
+            ex_topic = _topic_words(ex)
+            if not ex_topic:
+                continue
+            overlap = ins_topic & ex_topic
+            if len(overlap) >= max(1, min(len(ins_topic), len(ex_topic)) // 2):
+                return ex
+    return None
+
+
 def superset(a, b):
-    """True if every line of b appears in a and a is strictly larger.
-    This is the no-data-loss proof: promoting a over b cannot drop a line."""
-    la, lb = a.splitlines(), b.splitlines()
-    if len(la) < len(lb):
+    """True only if a can replace b with provably no loss: every line of b
+    survives in a in the SAME ORDER (difflib opcodes against b are equal/
+    insert only -- a reorder, edit, or dropped line returns False in both
+    directions), and no line a inserts negation-flips a line it keeps
+    (see negation_conflict). This is the no-data-loss proof behind PROMOTE."""
+    if a == b:
         return False
-    ca, cb = set(la), set(lb)
-    return cb <= ca and a != b
+    la, lb = a.splitlines(), b.splitlines()
+    sm = difflib.SequenceMatcher(a=lb, b=la, autojunk=False)
+    inserted = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "insert":
+            inserted.extend(la[j1:j2])
+            continue
+        return False  # delete/replace: b has content a doesn't keep in order
+    if negation_conflict(lb, inserted):
+        return False
+    return True
 
 
 def lost_lines(winner, loser):
@@ -192,9 +316,9 @@ def lost_lines(winner, loser):
 def decide(name, per_profile):
     """Return (action, winner_profile, detail).
 
-    action in {"clean", "add", "promote", "conflict", "skip"}
+    action in {"clean", "add", "promote", "conflict", "divergent-ineligible", "skip"}
     """
-    live = {p: v for p, v in per_profile.items()}
+    live = dict(per_profile)
     elig = {p: v for p, v in live.items() if v["eligible"]}
     if not elig:
         return "skip", None, "not doctrine-grade in any store"
@@ -204,10 +328,21 @@ def decide(name, per_profile):
     if pinned:
         return "skip", None, "pinned local by %s" % ", ".join(sorted(pinned))
 
-    shas = {v["sha"] for v in elig.values()}
+    elig_shas = {v["sha"] for v in elig.values()}
+
+    # MEM-4(f): a store that opted this memory OUT of sync but holds
+    # different content is neither "clean" (nothing to compare against) nor
+    # a promotion target -- it must surface, always.
+    divergent = sorted(p for p, v in live.items()
+                        if not v["eligible"] and v["sha"] not in elig_shas)
+    if divergent:
+        detail = "; ".join("%s (%s)" % (p, live[p]["reason"]) for p in divergent)
+        return ("divergent-ineligible", None,
+                "ineligible copy differs from the doctrine-grade version: %s" % detail)
+
     missing = [p for p in PROFILES if p not in live]
 
-    if len(shas) == 1:
+    if len(elig_shas) == 1:
         if not missing:
             return "clean", None, ""
         src = sorted(elig)[0]
@@ -250,40 +385,147 @@ def find_index_line(lines, name):
     return -1
 
 
+def line_segments(line):
+    """Split a bullet index line into (prefix, [segment, ...]) on ' · ', so a
+    single memory's segment can be read or replaced without touching a
+    sibling memory's link on the same physical line."""
+    m = re.match(r"^(\s*-\s*)(.*)$", line)
+    if not m:
+        return "", [line]
+    return m.group(1), m.group(2).split(" · ")
+
+
+def segment_for(segs, name):
+    pat = re.compile(r"\]\(\s*%s\s*\)" % re.escape(name))
+    for i, s in enumerate(segs):
+        if pat.search(s):
+            return i
+    return -1
+
+
 def plan_index(name, source_profile, targets):
-    """[(profile, 'append'|'replace', line)] — never duplicates, never touches
-    a line belonging to a different memory."""
+    """[(profile, mode, name, payload)] per-target index op.
+
+    mode 'append'  payload is a brand-new line (target has no entry yet).
+    mode 'merge'   payload is only this memory's ' · ' segment, spliced into
+                   the target's existing line without disturbing a sibling
+                   segment -- this is the MEM-3 fix: a multi-link source line
+                   no longer drags an ineligible sibling's link along.
+    mode 'replace' whole-line fallback, used ONLY when the source line does
+                   not split into recognizable ' · ' segments; logged, not
+                   silent.
+    """
     src = index_lines(source_profile)
     i = find_index_line(src, name)
     if i < 0:
         return []
     line = src[i]
+    prefix, segs = line_segments(line)
+    si = segment_for(segs, name)
+    fallback = si < 0
+    if fallback:
+        print("  NOTE     %-46s index line has no ' · ' segment for this "
+              "link; falling back to whole-line copy" % name, file=sys.stderr)
+        seg_payload = line
+    else:
+        seg_payload = segs[si]
+
     out = []
     for p in targets:
         lines = index_lines(p)
         j = find_index_line(lines, name)
         if j < 0:
-            out.append((p, "append", line))
-        elif lines[j] != line:
-            out.append((p, "replace", line))
+            new_line = line if fallback else (prefix + seg_payload)
+            out.append((p, "append", name, new_line))
+            continue
+        if fallback:
+            if lines[j] != line:
+                out.append((p, "replace", name, line))
+            continue
+        tprefix, tsegs = line_segments(lines[j])
+        tsi = segment_for(tsegs, name)
+        if tsi >= 0 and tsegs[tsi] == seg_payload:
+            continue  # already correct
+        out.append((p, "merge", name, seg_payload))
     return out
 
 
-def write_index(profile, name, line, mode):
+def write_index(profile, name, payload, mode):
     p = index_path(profile)
     before = read(p) if os.path.exists(p) else "# Memory index\n"
     lines = before.splitlines()
     j = find_index_line(lines, name)
-    if mode == "replace" and j >= 0:
-        lines[j] = line
-    elif j < 0:
+    if mode == "append":
+        if j >= 0:
+            return False
         while lines and not lines[-1].strip():
             lines.pop()
-        lines.append(line)
+        lines.append(payload)
+    elif mode == "replace":
+        if j < 0:
+            return False
+        lines[j] = payload
+    elif mode == "merge":
+        if j < 0:
+            return False
+        prefix, segs = line_segments(lines[j])
+        si = segment_for(segs, name)
+        if si >= 0:
+            segs[si] = payload
+        else:
+            segs.append(payload)
+        lines[j] = prefix + " · ".join(segs)
     else:
         return False
     atomic_write(p, "\n".join(lines) + "\n", expect=before)
     return True
+
+
+def index_health(store):
+    """Per-registered-profile index hygiene (MEM-3, CD-R4-1: checked on every
+    profile, not main only).
+
+    Returns (dangling, unindexed, byte_over, dupes):
+      dangling   [(profile, line_no, target)] index link -> file that doesn't
+                 exist in that profile's store.
+      unindexed  [(profile, name)] doctrine-grade memory present+eligible in
+                 a profile whose index there has no entry for it.
+      byte_over  {profile: (size_bytes, [line_no, ...])} profiles whose
+                 MEMORY.md exceeds BYTE_BUDGET, with the lines past it.
+      dupes      ["profile: target xN", ...] index links to the same target
+                 appearing more than once in a profile's index (warn-only;
+                 never affects the exit code — same as before this scan was
+                 folded into index_health()).
+    """
+    dangling, unindexed = [], []
+    byte_over = {}
+    dupes = []
+    for p in PROFILES:
+        d = memdir(p)
+        if not os.path.isdir(d):
+            continue
+        seen = {}
+        for ln, line in enumerate(index_lines(p), 1):
+            for target in re.findall(r"\]\(([^)]+\.md)\)", line):
+                if not os.path.exists(os.path.join(d, target)):
+                    dangling.append((p, ln, target))
+                seen[target] = seen.get(target, 0) + 1
+        dupes += ["%s: %s x%d" % (p, k, v) for k, v in sorted(seen.items()) if v > 1]
+        ip = index_path(p)
+        text = read(ip) if os.path.exists(ip) else ""
+        size = len(text.encode("utf-8"))
+        if size > BYTE_BUDGET:
+            over, running = [], 0
+            for ln, line in enumerate(text.splitlines(), 1):
+                running += len(line.encode("utf-8")) + 1
+                if running > BYTE_BUDGET:
+                    over.append(ln)
+            byte_over[p] = (size, over)
+    for name in sorted(store):
+        for p, v in store[name].items():
+            if v["eligible"] and find_index_line(index_lines(p), name) < 0:
+                unindexed.append((p, name))
+    return dangling, unindexed, byte_over, dupes
 
 
 # ---------------------------------------------------------------------- io
@@ -307,29 +549,42 @@ def atomic_write(path, text, expect=None):
         raise
 
 
+def snapshots_dir():
+    # Derived from VAULT at call time (not a frozen module constant) so a
+    # test that monkeypatches VAULT never has snapshot() fall through to a
+    # live path computed at import time.
+    return os.path.join(VAULT, "snapshots")
+
+
+def quarantine_dir():
+    return os.path.join(VAULT, "conflicts")
+
+
 def snapshot(tag="pre-sync"):
-    os.makedirs(SNAPSHOTS, exist_ok=True)
+    snaps = snapshots_dir()
+    os.makedirs(snaps, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y-%m-%dT%H%M%S")
-    out = os.path.join(SNAPSHOTS, "claude-memory-%s-%s.tar.gz" % (stamp, tag))
+    out = os.path.join(snaps, "claude-memory-%s-%s.tar.gz" % (stamp, tag))
     with tarfile.open(out, "w:gz") as tar:
         for profile in PROFILES:
             d = memdir(profile)
             if os.path.isdir(d):
                 tar.add(d, arcname=profile)
-    keep = sorted(f for f in os.listdir(SNAPSHOTS) if f.endswith(".tar.gz"))
+    keep = sorted(f for f in os.listdir(snaps) if f.endswith(".tar.gz"))
     for old in keep[:-SNAPSHOT_KEEP]:
-        os.unlink(os.path.join(SNAPSHOTS, old))
+        os.unlink(os.path.join(snaps, old))
     with open(os.path.join(VAULT, "last-ok.json"), "w") as fh:
         json.dump({"snapshot": out, "ts": dt.datetime.now().isoformat()}, fh, indent=2)
     return out
 
 
 def quarantine(name, per_profile):
-    os.makedirs(QUARANTINE, exist_ok=True)
+    qdir = quarantine_dir()
+    os.makedirs(qdir, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y-%m-%d")
     saved = []
     for p, v in sorted(per_profile.items()):
-        dest = os.path.join(QUARANTINE, "%s.%s.%s.txt" % (name[:-3], p, stamp))
+        dest = os.path.join(qdir, "%s.%s.%s.txt" % (name[:-3], p, stamp))
         if not os.path.exists(dest):
             with open(dest, "w", encoding="utf-8") as fh:
                 fh.write(v["text"])
@@ -337,21 +592,64 @@ def quarantine(name, per_profile):
     return saved
 
 
+def _owner_path():
+    return os.path.join(LOCKDIR, "owner")
+
+
+def _write_owner_token():
+    token = "pid=%d host=%s started_at=%s\n" % (
+        os.getpid(), socket.gethostname(), dt.datetime.now().isoformat())
+    with open(_owner_path(), "w") as fh:
+        fh.write(token)
+    return token
+
+
 def lock():
+    """Acquire LOCKDIR. A stale lock (age > LOCK_STALE_SECONDS) is broken by
+    renaming it aside and recreating it, so of several late callers racing a
+    dead lock exactly one wins the makedirs and writes the owner token; the
+    rest back off (MEM-4(d): the old code returned True for every caller that
+    saw a stale lock, without recreating it or recording who held it)."""
     try:
         os.makedirs(LOCKDIR)
+        _write_owner_token()
         return True
     except FileExistsError:
         try:
             age = dt.datetime.now().timestamp() - os.path.getmtime(LOCKDIR)
-            if age > 1800:          # a run that old is dead, not running
-                return True
         except OSError:
-            pass
-        return False
+            age = 0
+        if age <= LOCK_STALE_SECONDS:
+            return False
+        aside = LOCKDIR + ".stale.%d.%d" % (os.getpid(), int(dt.datetime.now().timestamp()))
+        try:
+            os.rename(LOCKDIR, aside)
+        except OSError:
+            return False  # someone else already broke it; back off
+        try:
+            os.makedirs(LOCKDIR)
+        except FileExistsError:
+            return False
+        _write_owner_token()
+        shutil.rmtree(aside, ignore_errors=True)
+        return True
 
 
 def unlock():
+    """Remove LOCKDIR only if the owner token still names this process --
+    a caller that lost a stale-lock race must never delete the winner's
+    lock (MEM-4(d))."""
+    try:
+        with open(_owner_path()) as fh:
+            token = fh.read()
+    except OSError:
+        return
+    if ("pid=%d " % os.getpid()) not in token:
+        return
+    try:
+        os.unlink(_owner_path())
+    except OSError:
+        pass
     try:
         os.rmdir(LOCKDIR)
     except OSError:
@@ -440,7 +738,8 @@ def main():
 
     try:
         store = scan()
-        adds, promotes, conflicts, clean, skipped = [], [], [], 0, 0
+        adds, promotes, conflicts, divergent = [], [], [], []
+        clean = skipped = 0
         now = dt.datetime.now().timestamp()
 
         for name in sorted(store):
@@ -459,6 +758,8 @@ def main():
                 continue
             if action == "conflict":
                 conflicts.append((name, per))
+            elif action == "divergent-ineligible":
+                divergent.append((name, per, detail))
             elif action == "add":
                 adds.append((name, winner, per, detail))
             else:
@@ -500,6 +801,9 @@ def main():
                                 l, w, lineterm="", n=0))[:14]:
                             print("           | " + d[:150])
 
+        for name, per, why in divergent:
+            print("  NOTE     %-46s divergent-ineligible: %s" % (name, why))
+
         for name, per in conflicts:
             print("  CONFLICT %-46s no copy contains all the others" % name)
             for p, v in sorted(per.items()):
@@ -520,36 +824,35 @@ def main():
             index_ops += plan_index(name, w, [p for p in PROFILES if p != w])
         if index_ops:
             print()
-            for p, mode, line in index_ops:
-                print("  INDEX    %-8s %-8s %s" % (p, mode, line[:96]))
+            for p, mode, name, payload in index_ops:
+                print("  INDEX    %-8s %-8s %s" % (p, mode, payload[:96]))
 
-        # Index hygiene: report only. Composing an index hook line, or choosing
-        # which of two duplicate lines to keep, is judgment -- not a sync job.
-        unindexed, dupes = [], []
-        for name in sorted(store):
-            if not any(v["eligible"] for v in store[name].values()):
-                continue
-            if all(find_index_line(index_lines(p), name) < 0
-                   for p in PROFILES if p in store[name]):
-                unindexed.append(name)
-        for p in PROFILES:
-            seen = {}
-            for line in index_lines(p):
-                for link in re.findall(r"\]\(([^)]+\.md)\)", line):
-                    seen[link] = seen.get(link, 0) + 1
-            dupes += ["%s: %s x%d" % (p, k, v) for k, v in sorted(seen.items()) if v > 1]
-        if unindexed or dupes:
+        # Index hygiene (MEM-3, CD-R4-1): dangling links and unindexed
+        # eligible memories now FAIL --check, per registered profile; the
+        # byte budget only WARNS. Applying sync never invents or removes an
+        # index line on its own beyond the ADD/PROMOTE segments above.
+        dangling, unindexed, byte_over, dupes = index_health(store)
+        unreg = unregistered_profile_dirs()
+        if dangling or unindexed or byte_over or dupes or unreg:
             print()
-            for n in unindexed:
-                print("  NOTE     %-46s doctrine-grade but in no MEMORY.md index" % n)
+            for d in unreg:
+                print("  NOTE     unregistered profile dir  %s (has %s, not in PROFILES)"
+                      % (d, os.path.join(REL, INDEX)))
+            for p, ln, target in dangling:
+                print("  NOTE     dangling index link  %s line %d -> %s (missing)" % (p, ln, target))
+            for p, name in unindexed:
+                print("  NOTE     unindexed eligible memory  %s: %s" % (p, name))
+            for p, (size, over) in sorted(byte_over.items()):
+                print("  NOTE     %s MEMORY.md is %d bytes (budget %d); entries past boundary at line(s) %s"
+                      % (p, size, BYTE_BUDGET, ", ".join(str(l) for l in over)))
             for d in dupes:
                 print("  NOTE     duplicate index line  %s" % d)
-            print("           (pre-existing index hygiene; sync never invents or "
-                  "removes an index line)")
+            print("           (index hygiene; sync never invents or removes an index line "
+                  "beyond the segment(s) above)")
 
         print()
-        print("  totals: %d add · %d promote · %d conflict · %d index line(s)"
-              % (len(adds), len(promotes), len(conflicts), len(index_ops)))
+        print("  totals: %d add · %d promote · %d conflict · %d divergent-ineligible · %d index line(s)"
+              % (len(adds), len(promotes), len(conflicts), len(divergent), len(index_ops)))
 
         # Provenance (memory-sisters design, decision 5, Jeff 2026-09-07): every
         # memory carries `status:` (active | superseded | retired) in its
@@ -584,7 +887,11 @@ def main():
             print("           (add `status: active` under metadata:; --check fails until every memory carries one)")
 
         if args.check:
-            return 2 if conflicts else (1 if (adds or promotes or no_status) else 0)
+            if conflicts:
+                return 2
+            if adds or promotes or divergent or dangling or unindexed or unreg or no_status:
+                return 1
+            return 0
 
         if not writing:
             if adds or promotes or conflicts:
@@ -609,27 +916,25 @@ def main():
                         print("  wrote  %s/%s" % (p, name))
                     except RuntimeError as e:
                         print("  SKIP   %s (%s)" % (dest, e), file=sys.stderr)
-            for p, mode, line in index_ops:
-                name = re.search(r"\]\(([^)]+)\)", line)
-                if name:
-                    try:
-                        if write_index(p, name.group(1).strip(), line, mode):
-                            print("  index  %s %s %s" % (p, mode, name.group(1)))
-                    except RuntimeError as e:
-                        print("  SKIP   index %s (%s)" % (p, e), file=sys.stderr)
+            for p, mode, name, payload in index_ops:
+                try:
+                    if write_index(p, name, payload, mode):
+                        print("  index  %s %s %s" % (p, mode, name))
+                except RuntimeError as e:
+                    print("  SKIP   index %s (%s)" % (p, e), file=sys.stderr)
 
         if conflicts:
             names = ", ".join(n for n, _ in conflicts)
             for name, per in conflicts:
                 saved = quarantine(name, per)
             print("\n  %d conflict(s) NOT written; copies quarantined in %s"
-                  % (len(conflicts), QUARANTINE))
+                  % (len(conflicts), quarantine_dir()))
             if args.scheduled:
                 board("memory-sync: %d doctrine memory conflict(s)" % len(conflicts),
                       "Divergent copies with no containing version: %s\n"
                       "Nothing was written. Byte-exact copies of every side are in %s\n"
                       "Resolve by hand, then rerun: ~/.claude/bin/memory-sync --apply"
-                      % (names, QUARANTINE),
+                      % (names, quarantine_dir()),
                       "memory-sync-conflict-" + sha(names)[:12])
             return 2
         return 0
