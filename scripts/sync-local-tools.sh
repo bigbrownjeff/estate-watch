@@ -27,6 +27,7 @@ rows=(
   "local-tools/phoenix-enrich.py|$HOME/.claude/bin/phoenix-enrich.py|0755"
   "local-tools/morning-digest.py|$HOME/.claude/bin/morning-digest.py|0755"
   "local-tools/worktree-janitor.py|$HOME/.claude/bin/worktree-janitor.py|0755"
+  "local-tools/dangling-tasks.py|$HOME/.claude/bin/dangling-tasks.py|0755"
 )
 
 case "$mode" in
