@@ -210,7 +210,7 @@ class TestIndex(Base):
         self.assertIn("entries past boundary at line(s)", out)
 
     def test_check_green_means_target_can_retrieve_named_rule(self):
-        self.mem("main", "rule-d.md", ["type: feedback"], "Rule D body\n")
+        self.mem("main", "rule-d.md", ["type: feedback", "status: active"], "Rule D body\n")
         self.index("main", "# Memory index\n- [Rule D](rule-d.md) - hook\n")
         code, _ = run(["--apply"])
         self.assertEqual(code, 0)
@@ -219,6 +219,19 @@ class TestIndex(Base):
         for p in self.PROFILE_NAMES:
             self.assertTrue(os.path.exists(os.path.join(ms.memdir(p), "rule-d.md")))
             self.assertIn("rule-d.md", ms.read(ms.index_path(p)))
+
+    def test_check_exits_nonzero_on_missing_status_alone(self):
+        # Rebase seam (2026-09-15): provenance's no_status gate (main #19) and
+        # this branch's divergent/dangling/unindexed/unreg gate (this branch,
+        # #17-era) must OR together in one return, not silently replace one
+        # another -- a fully synced, fully indexed memory with no status: line
+        # is the ONLY thing wrong here, and that alone must fail --check.
+        for p in self.PROFILE_NAMES:
+            self.mem(p, "x.md", ["type: feedback"], "body\n")
+            self.index(p, "# Memory index\n- [X](x.md) - hook\n")
+        code, out = run(["--check"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("PROVENANCE missing status: main: x.md", out)
 
     def test_per_profile_dangling_link_report_lists_profile_and_target(self):
         # CD-R4-1: claudette-only dangling link must show up, not just main's.
@@ -234,7 +247,7 @@ class TestIndex(Base):
         # W6-V1: a target linked twice in the same profile's index is a
         # warn-only NOTE (like before this scan moved into index_health()),
         # never a --check failure on its own.
-        self.mem("main", "rule-e.md", ["type: feedback"], "Rule E body\n")
+        self.mem("main", "rule-e.md", ["type: feedback", "status: active"], "Rule E body\n")
         self.index("main", "# Memory index\n"
                             "- [Rule E](rule-e.md) - hook\n"
                             "- [Rule E again](rule-e.md) - hook\n")
