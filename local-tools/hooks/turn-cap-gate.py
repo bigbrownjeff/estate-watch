@@ -28,6 +28,7 @@ Overrides (per session, via the environment the session was launched with):
 Anything unexpected (bad JSON, unreadable transcript) exits 0: the gate fails
 open, because only a deliberate deny may ever block a tool call.
 """
+import glob
 import hashlib
 import json
 import os
@@ -38,6 +39,7 @@ import time
 STATE_DIR = os.path.expanduser("~/.claude/state/turn-cap")
 LEDGER = os.path.join(STATE_DIR, "lanes.tsv")
 
+REPORT_TOOLS = ("SubagentHandback", "StructuredOutput")
 GIT_PERSIST = re.compile(
     r"^\s*(cd\s+\S+\s*(&&|;)\s*)?git\s+(-C\s+\S+\s+)?"
     r"(add|commit|push|status|diff|log|stash|worktree\s+list)\b"
@@ -136,12 +138,23 @@ def main():
         return 0  # a main, interactive session: exempt
     if "/subagents/" not in tp:
         sess = payload.get("session_id") or re.sub(r"\.jsonl$", "", os.path.basename(tp))
-        tp = os.path.join(os.path.dirname(tp), sess, "subagents", f"agent-{sub_id}.jsonl")
+        sub_root = os.path.join(os.path.dirname(tp), sess, "subagents")
+        tp = os.path.join(sub_root, f"agent-{sub_id}.jsonl")
+        if not os.path.isfile(tp):
+            # 2026-09-17, measured: a Workflow arm's transcript is one level down, at
+            # subagents/workflows/<wf id>/agent-<id>.jsonl. The flat path never existed for
+            # an arm, the count sat at 1, and the gate never fired for one: 35 arms ran past
+            # 40 tool turns in a day (the worst 363) under an "enforcing" hook.
+            hits = glob.glob(os.path.join(sub_root, "**", f"agent-{sub_id}.jsonl"), recursive=True)
+            if hits:
+                tp = hits[0]
     if not tp:
         return 0
+    is_arm = "/subagents/workflows/" in tp
 
-    cap = env_int("LANE_TURN_CAP", 25)
-    warn = env_int("LANE_TURN_WARN", 18)
+    # Workflow arms are page-scale build and gate steps; they get the burn meter's cap (40).
+    cap = env_int("WORKFLOW_ARM_TURN_CAP", 40) if is_arm else env_int("LANE_TURN_CAP", 25)
+    warn = env_int("WORKFLOW_ARM_TURN_WARN", 30) if is_arm else env_int("LANE_TURN_WARN", 18)
     hard = env_int("LANE_TURN_HARD", cap + 4)
 
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -154,14 +167,17 @@ def main():
     except Exception:
         cache = {}
 
-    if os.path.isfile(tp):
+    found = os.path.isfile(tp)
+    if found:
         turns, offset = count_new_turns(tp, cache)
     else:  # the lane's very first call can precede its transcript file
         turns, offset = cache.get("count", 0), cache.get("offset", 0)
     turns += 1  # the call being gated right now
     try:
         with open(cache_path, "w") as fh:
-            json.dump({"offset": offset, "count": turns - 1, "path": tp,
+            # With no transcript to read, count the calls themselves, so a lane the gate
+            # cannot find is still a lane the gate can stop.
+            json.dump({"offset": offset, "count": turns - 1 if found else turns, "path": tp,
                        "updated": time.time()}, fh)
     except Exception:
         pass
@@ -190,6 +206,12 @@ def main():
                                                  "additionalContext": ctx}}))
         if turns == warn:
             append_ledger(agent_id, meta, turns, "WARN")
+        return 0
+
+    if tool in REPORT_TOOLS:
+        # Delivering the report is what the cap asks for; denying it strands the lane
+        # (2026-09-15: six SubagentHandback calls blocked, coordinator got no report).
+        append_ledger(agent_id, meta, turns, "CAP-report-allowed")
         return 0
 
     stop_msg = (
