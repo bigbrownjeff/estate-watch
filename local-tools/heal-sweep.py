@@ -384,6 +384,10 @@ def classify_ending(msg):
     content = (msg or {}).get("message", {}).get("content")
     if not isinstance(content, list):
         return "unknown"
+    if (msg or {}).get("isApiErrorMessage"):
+        # a synthetic harness message (429, refusal, overload), never a report
+        err_text = "\n".join(b.get("text") or "" for b in content if isinstance(b, dict)).lower()
+        return "session-limit" if ("hit your" in err_text and "limit" in err_text) else "api-error"
     tool_use_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
     text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
     if any(b.get("name") == "StructuredOutput" for b in tool_use_blocks):
@@ -418,6 +422,8 @@ def classify_burn_agent(card):
                  % (agent_id, path, idle_hours)), None
     if ending == "session-limit":
         return None, "burn:agent %s — session-limit death, not delivered (idle %.1fh)" % (agent_id, idle_hours)
+    if ending == "api-error":
+        return None, "burn:agent %s — ended on a harness API error, not delivered (idle %.1fh)" % (agent_id, idle_hours)
     if ending == "mid-work":
         return None, "burn:agent %s — ended mid-work (tool_use, not StructuredOutput), idle %.1fh" % (agent_id, idle_hours)
     return None, "burn:agent %s — could not classify ending (idle %.1fh)" % (agent_id, idle_hours)
@@ -504,6 +510,21 @@ def already_closed(gh_bin, repo, number):
         return False  # unknown -> proceed, worst case a harmless duplicate comment
 
 
+def stamp_done(gh_bin, card, repo, number):
+    try:
+        r = subprocess.run([gh_bin, "project", "item-edit", "--project-id", PROJECT_ID,
+                            "--id", card["item_id"], "--field-id", FIELD_STATUS,
+                            "--single-select-option-id", STATUS_DONE_OPT],
+                           capture_output=True, text=True, timeout=90)
+        if r.returncode != 0:
+            log("status edit failed for %s#%s: %s" % (repo, number, r.stderr.strip()[:200]))
+            return False
+    except Exception as e:
+        log("status edit error for %s#%s: %r" % (repo, number, e))
+        return False
+    return True
+
+
 def close_card(gh_bin, card, evidence):
     stamp = "healed: %s %s" % (now_iso(), evidence)
     repo = card["repository"] or BOARD_REPO
@@ -512,9 +533,12 @@ def close_card(gh_bin, card, evidence):
         log("DRY-RUN would comment+close %s#%s (%s): %s" % (repo, number, card["ref"], stamp))
         return True
     if already_closed(gh_bin, repo, number):
-        log("SKIP %s#%s (T-%s) — already closed since the export was read, no duplicate action"
+        # The export read this card as not Done. The project's own close->Done
+        # workflow misses about 3% of closes (25 of 918 on 2026-09-17), so stamp
+        # it here; on a card the workflow did stamp, this is an idempotent no-op.
+        log("SKIP %s#%s (T-%s) — already closed since the export was read, no duplicate comment"
             % (repo, number, card["ref"]))
-        return True
+        return stamp_done(gh_bin, card, repo, number)
     ok = True
     try:
         r = subprocess.run([gh_bin, "issue", "comment", str(number), "-R", repo, "--body", stamp],
@@ -526,17 +550,7 @@ def close_card(gh_bin, card, evidence):
         log("comment error for %s#%s: %r" % (repo, number, e))
         ok = False
     time.sleep(PACE_S)
-    try:
-        r = subprocess.run([gh_bin, "project", "item-edit", "--project-id", PROJECT_ID,
-                            "--id", card["item_id"], "--field-id", FIELD_STATUS,
-                            "--single-select-option-id", STATUS_DONE_OPT],
-                           capture_output=True, text=True, timeout=90)
-        if r.returncode != 0:
-            log("status edit failed for %s#%s: %s" % (repo, number, r.stderr.strip()[:200]))
-            ok = False
-    except Exception as e:
-        log("status edit error for %s#%s: %r" % (repo, number, e))
-        ok = False
+    ok = stamp_done(gh_bin, card, repo, number) and ok
     time.sleep(PACE_S)
     try:
         r = subprocess.run([gh_bin, "issue", "close", str(number), "-R", repo,

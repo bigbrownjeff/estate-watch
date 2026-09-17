@@ -59,6 +59,8 @@ STRUCTURED_END = [assistant_msg([{"type": "text", "text": "wrapping up"}]),
 TEXT_END = [assistant_msg([{"type": "tool_use", "name": "Read", "input": {}}]),
             assistant_msg([{"type": "text", "text": "All done, task complete."}])]
 SESSION_LIMIT_END = [assistant_msg([{"type": "text", "text": "Looks like you hit your usage limit for now."}])]
+API_ERROR_END = [dict(assistant_msg([{"type": "text", "text": "API Error: the model declined. Start a new session."}]),
+                      isApiErrorMessage=True)]
 MID_WORK_END = [assistant_msg([{"type": "text", "text": "working on it"}]),
                 assistant_msg([{"type": "tool_use", "name": "Bash", "input": {}}])]
 
@@ -112,6 +114,19 @@ def test_session_limit_stays_open():
         evidence, reason = mod.classify_burn_agent(card_for("a3"))
         check("session-limit death stays open", evidence is None, str((evidence, reason)))
         check("reason names session-limit", reason is not None and "session-limit" in reason, str(reason))
+
+
+def test_api_error_stays_open():
+    with tempfile.TemporaryDirectory() as tmp:
+        mod = load_heal_sweep()
+        mod.PROFILE_HOME = tmp
+        path = os.path.join(tmp, ".claude-claudette", "projects",
+                             "sess1/subagents/workflows/wf1/agent-a3e.jsonl")
+        write_jsonl(path, API_ERROR_END)
+        set_mtime(path, 1.0)
+        evidence, reason = mod.classify_burn_agent(card_for("a3e"))
+        check("text-only harness API error stays open", evidence is None, str((evidence, reason)))
+        check("reason names the API error", reason is not None and "API error" in reason, str(reason))
 
 
 def test_mid_work_stays_open():
@@ -221,6 +236,28 @@ def test_rollup_open_when_below_threshold():
         check("rollup stays open when no transcript exceeds the 40-tool_use floor", evidence is None, str((evidence, reason)))
 
 
+def test_already_closed_card_still_gets_done_stamp():
+    mod = load_heal_sweep()
+    mod.DRYRUN = False
+    mod.QUIET = True
+    calls = []
+
+    class R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    mod.already_closed = lambda gh_bin, repo, number: True
+    mod.subprocess.run = lambda args, **kw: (calls.append(list(args)), R())[1]
+    mod.log = lambda msg: None
+    card = {"repository": "o/r", "number": 7, "ref": "1", "item_id": "ITEM_x"}
+    ok = mod.close_card("gh", card, "evidence")
+    edits = [c for c in calls if c[1:3] == ["project", "item-edit"]]
+    check("already-closed card gets exactly one Done stamp", ok and len(edits) == 1 and "ITEM_x" in edits[0], str(calls))
+    check("already-closed card gets no comment and no close",
+          not any(c[1:3] in (["issue", "comment"], ["issue", "close"]) for c in calls), str(calls))
+
+
 def test_class_of_buckets_burn():
     mod = load_heal_sweep()
     check("class_of(burn:agent:x) is burn", mod.class_of("burn:agent:x") == "burn")
@@ -250,6 +287,8 @@ if __name__ == "__main__":
     test_delivered_structured_heals()
     test_delivered_text_heals()
     test_session_limit_stays_open()
+    test_already_closed_card_still_gets_done_stamp()
+    test_api_error_stays_open()
     test_mid_work_stays_open()
     test_fresh_mtime_stays_open()
     test_missing_transcript_stays_open()
