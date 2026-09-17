@@ -25,6 +25,13 @@ Heal classes:
         the card's `filed:` timestamp.
   3. memory-sync-conflict-*
      -> `memory-sync --check` exits 0 right now.
+  4. burn:agent:<agentid> / burn:agent-rollup:<YYYY-MM-DD>
+     -> the agent's transcript (a JSONL log under a Claude profile's
+        projects/ tree) exists, is idle more than 30 minutes, and its
+        last assistant message DELIVERED (a StructuredOutput tool_use,
+        or a final text block that is not a session-limit death). A
+        rollup card is healed only when every >40-tool_use subagent
+        transcript in its 24h window (+2h pad) satisfies the same test.
 
 Everything else is left open and counted as "no machine-checkable heal" by
 failkey-class prefix, never guessed at.
@@ -69,6 +76,23 @@ QUIET = "--quiet" in sys.argv[1:]
 FAILKEY_RE = re.compile(r"failkey:\s*(\S+)")
 FILED_RE = re.compile(r"filed:\s*(\S+)")
 LAUNCHD_RE = re.compile(r"^(?:pulse:)?launchd:(.+)$")
+BURN_AGENT_RE = re.compile(r"^burn:agent:(.+)$")
+BURN_ROLLUP_RE = re.compile(r"^burn:agent-rollup:(\d{4}-\d{2}-\d{2})$")
+BURN_PROFILE_RE = re.compile(r"profile:\s*([A-Za-z0-9_-]+)")
+BURN_TRANSCRIPT_RE = re.compile(r"transcript:\s*(\S+)")
+BURN_IDLE_S = 30 * 60  # heal only once a transcript has stopped writing
+
+# Profile label (as stamped in a burn card body) -> its home dir name, per
+# memory "Four profile sisters". PROFILE_HOME is the base these join against
+# — a module-level var, not a hardcoded HOME read, so tests can point it at
+# a tmpdir instead of the real ~/.claude* trees.
+PROFILE_HOME = HOME
+PROFILE_DIR_MAP = {
+    "claude": ".claude",
+    "claude-claudette": ".claude-claudette",
+    "claude-claudine": ".claude-claudine",
+    "claude-claudeux": ".claude-claudeux",
+}
 
 # Quartet backup lanes with a tested last-ok.json contract (see
 # CLAUDE.md "Backup coverage" anchors + each ops/data_snapshot.sh).
@@ -150,6 +174,7 @@ def load_open_failure_cards():
             "repository": (content.get("repository") or "").replace("https://github.com/", ""),
             "failkey": m.group(1),
             "filed_ts": filed_ts,
+            "body": body,
         })
     return out
 
@@ -277,6 +302,163 @@ def check_memory_sync():
     return _memsync_checked
 
 
+# --------------------------------------------------------------- burn class
+def profile_dir_for_label(label):
+    rel = PROFILE_DIR_MAP.get(label)
+    return os.path.join(PROFILE_HOME, rel) if rel else None
+
+
+def glob_profile_roots():
+    return sorted(glob.glob(os.path.join(PROFILE_HOME, ".claude*")))
+
+
+def agent_id_from_path(path):
+    m = re.search(r"agent-([^/]+)\.jsonl$", os.path.basename(path))
+    return m.group(1) if m else os.path.basename(path)
+
+
+def resolve_agent_transcript(profile_label, transcript_rel, agent_id):
+    """VERIFIED path shape: transcript_rel is relative to
+    <profile dir>/projects/. Falls back to a glob for agent-<id>.jsonl under
+    any profile's projects/ tree when the direct path doesn't resolve."""
+    pdir = profile_dir_for_label(profile_label) if profile_label else None
+    if pdir and transcript_rel:
+        candidate = os.path.join(pdir, "projects", transcript_rel)
+        if os.path.isfile(candidate):
+            return candidate
+    if agent_id:
+        pattern = os.path.join(PROFILE_HOME, ".claude*", "projects", "**", "agent-%s.jsonl" % agent_id)
+        hits = glob.glob(pattern, recursive=True)
+        if hits:
+            return hits[0]
+    return None
+
+
+def last_assistant_message(transcript_path):
+    """Streams the file; json.loads only lines that could be an assistant
+    message (transcripts run tens of MB, never load the whole file)."""
+    last = None
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"assistant"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("type") == "assistant":
+                    last = obj
+    except Exception:
+        return None
+    return last
+
+
+def count_tool_use_assistant_messages(transcript_path):
+    n = 0
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"assistant"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("type") != "assistant":
+                    continue
+                content = (obj.get("message") or {}).get("content")
+                if isinstance(content, list) and any(
+                        isinstance(b, dict) and b.get("type") == "tool_use" for b in content):
+                    n += 1
+    except Exception:
+        return 0
+    return n
+
+
+def classify_ending(msg):
+    """DELIVERED: last assistant message has a StructuredOutput tool_use, OR
+    has text and no tool_use block at all (except a session-limit death,
+    which is text but NOT delivered). Any other tool_use block ending is
+    mid-work. Verified 2026-09-17 on 115 over-cap transcripts."""
+    content = (msg or {}).get("message", {}).get("content")
+    if not isinstance(content, list):
+        return "unknown"
+    tool_use_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+    text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
+    if any(b.get("name") == "StructuredOutput" for b in tool_use_blocks):
+        return "delivered"
+    if tool_use_blocks:
+        return "mid-work"
+    if text_blocks:
+        full_text = "\n".join(b.get("text") or "" for b in text_blocks).lower()
+        if "hit your" in full_text and "limit" in full_text:
+            return "session-limit"
+        return "delivered"
+    return "unknown"
+
+
+def classify_burn_agent(card):
+    agent_id = BURN_AGENT_RE.match(card["failkey"]).group(1)
+    body = card.get("body") or ""
+    pm = BURN_PROFILE_RE.search(body)
+    tm = BURN_TRANSCRIPT_RE.search(body)
+    profile_label = pm.group(1) if pm else None
+    transcript_rel = tm.group(1) if tm else None
+    path = resolve_agent_transcript(profile_label, transcript_rel, agent_id)
+    if not path:
+        return None, ("burn:agent %s — transcript not found (profile=%r transcript=%r)"
+                       % (agent_id, profile_label, transcript_rel))
+    idle_hours = (time.time() - os.path.getmtime(path)) / 3600.0
+    if idle_hours < BURN_IDLE_S / 3600.0:
+        return None, "burn:agent %s — transcript %s too fresh (%.2fh idle)" % (agent_id, path, idle_hours)
+    ending = classify_ending(last_assistant_message(path))
+    if ending == "delivered":
+        return ("burn:agent %s: transcript %s ended delivered (idle %.1fh)"
+                 % (agent_id, path, idle_hours)), None
+    if ending == "session-limit":
+        return None, "burn:agent %s — session-limit death, not delivered (idle %.1fh)" % (agent_id, idle_hours)
+    if ending == "mid-work":
+        return None, "burn:agent %s — ended mid-work (tool_use, not StructuredOutput), idle %.1fh" % (agent_id, idle_hours)
+    return None, "burn:agent %s — could not classify ending (idle %.1fh)" % (agent_id, idle_hours)
+
+
+def classify_burn_rollup(card):
+    date_str = BURN_ROLLUP_RE.match(card["failkey"]).group(1)
+    filed_ts = card["filed_ts"]
+    if filed_ts is None:
+        return None, "burn:agent-rollup %s — card has no parseable filed timestamp" % date_str
+    window_start, window_end = filed_ts - 24 * 3600, filed_ts + 2 * 3600
+    candidates = []
+    for root in glob_profile_roots():
+        for path in glob.glob(os.path.join(root, "projects", "**", "agent-*.jsonl"), recursive=True):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if not (window_start <= mtime <= window_end):
+                continue
+            if count_tool_use_assistant_messages(path) > 40:
+                candidates.append((path, mtime))
+    if not candidates:
+        return None, ("burn:agent-rollup %s — no subagent transcript in window with "
+                       ">40 tool_use assistant messages" % date_str)
+    now = time.time()
+    fresh = [p for p, mt in candidates if (now - mt) < BURN_IDLE_S]
+    if fresh:
+        return None, ("burn:agent-rollup %s — %d/%d candidate transcript(s) still fresh (<30min idle)"
+                       % (date_str, len(fresh), len(candidates)))
+    bad = []
+    for path, _mt in candidates:
+        ending = classify_ending(last_assistant_message(path))
+        if ending != "delivered":
+            bad.append("%s=%s" % (agent_id_from_path(path), ending))
+    if bad:
+        return None, "burn:agent-rollup %s — not all delivered: %s" % (date_str, ", ".join(bad))
+    return ("burn:agent-rollup %s: %d subagent transcript(s) >40 tool_use, all idle>30min and delivered"
+            % (date_str, len(candidates))), None
+
+
 # --------------------------------------------------------------------- classify
 def classify(card):
     fk = card["failkey"]
@@ -287,6 +469,10 @@ def classify(card):
         return check_backup(fk, card["filed_ts"])
     if fk.startswith("memory-sync-conflict-"):
         return check_memory_sync()
+    if BURN_AGENT_RE.match(fk):
+        return classify_burn_agent(card)
+    if BURN_ROLLUP_RE.match(fk):
+        return classify_burn_rollup(card)
     return None, "no machine-checkable heal for failkey class"
 
 
@@ -297,6 +483,8 @@ def class_of(failkey):
         return "backup"
     if failkey.startswith("memory-sync-conflict-"):
         return "memory-sync"
+    if BURN_AGENT_RE.match(failkey) or BURN_ROLLUP_RE.match(failkey):
+        return "burn"
     # a stable-ish bucket name for reporting only
     return failkey.split(":", 1)[0] if ":" in failkey else re.sub(r"[0-9a-f]{8,}$", "", failkey).rstrip("-") or failkey
 
