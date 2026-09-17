@@ -24,6 +24,7 @@ rows=(
   "local-tools/tests/test_failtask_issue_path.py|$HOME/.claude/bin/tests/test_failtask_issue_path.py|0755"
   "local-tools/tests/test_gh_board_export_comments.sh|$HOME/.claude/bin/tests/test_gh_board_export_comments.sh|0755"
   "local-tools/burn-meter.py|$HOME/.claude/bin/burn-meter.py|0755"
+  "local-tools/tests/test_burn_meter_dedupe.py|$HOME/.claude/bin/tests/test_burn_meter_dedupe.py|0755"
   "local-tools/heal-sweep.py|$HOME/.claude/bin/heal-sweep.py|0755"
   "local-tools/tests/test_heal_sweep_burn.py|$HOME/.claude/bin/tests/test_heal_sweep_burn.py|0755"
   "local-tools/phoenix-enrich.py|$HOME/.claude/bin/phoenix-enrich.py|0755"
