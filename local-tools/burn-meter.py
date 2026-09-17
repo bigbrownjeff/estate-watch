@@ -175,6 +175,11 @@ def collect(cutoff_utc, cutoff_epoch):
                 skey = (label, cls["session"])
                 first_user = None
                 models_seen = set()
+                # One API message is written as one JSONL line PER CONTENT BLOCK,
+                # each line carrying the whole message's usage. Summing lines
+                # counted a text + two tool_use message three times (2.36x on a
+                # 1,273-message session, 2026-09-17). Fold lines by message id.
+                folded = {}
 
                 try:
                     fh = open(fp, "r", errors="replace")
@@ -203,35 +208,46 @@ def collect(cutoff_utc, cutoff_epoch):
                             continue
                         if model == "<synthetic>":
                             continue  # placeholder turns, zero usage
-                        inp = usage.get("input_tokens") or 0
-                        out = usage.get("output_tokens") or 0
-                        cw = usage.get("cache_creation_input_tokens") or 0
-                        cr = usage.get("cache_read_input_tokens") or 0
-                        is_tool_turn = any(
+                        is_tool_line = isinstance(msg.get("content"), list) and any(
                             isinstance(c, dict) and c.get("type") == "tool_use"
-                            for c in (msg.get("content") or [])
-                            if isinstance(msg.get("content"), list)
+                            for c in msg["content"]
                         )
+                        mid = msg.get("id") or ("line-%d" % len(folded))
+                        prev = folded.get(mid)
+                        folded[mid] = {
+                            "usage": usage,  # the last line of a message has its final counts
+                            "model": model,
+                            "ts": prev["ts"] if prev else ts,
+                            "tool": is_tool_line or bool(prev and prev["tool"]),
+                            "persona": (d.get("attributionAgent") or meta.get("agentType")
+                                        or "main-loop (no persona)"),
+                        }
 
-                        def add(b):
-                            b["input"] += inp
-                            b["output"] += out
-                            b["cache_write"] += cw
-                            b["cache_read"] += cr
-                            b["turns"] += 1
-                            b["tool_turns"] += 1 if is_tool_turn else 0
+                for m in folded.values():
+                    usage, model, ts = m["usage"], m["model"], m["ts"]
+                    inp = usage.get("input_tokens") or 0
+                    out = usage.get("output_tokens") or 0
+                    cw = usage.get("cache_creation_input_tokens") or 0
+                    cr = usage.get("cache_read_input_tokens") or 0
+                    is_tool_turn = m["tool"]
 
-                        add(agg["by_model"][model])
-                        add(agg["by_profile"][label])
-                        add(agg["by_session"][skey])
-                        add(agg["by_agent"][akey])
-                        add(agg["by_hour"][ts.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:00")])
-                        persona = (d.get("attributionAgent") or meta.get("agentType")
-                                   or "main-loop (no persona)")
-                        add(agg["by_persona"][persona])
-                        models_seen.add(model)
-                        if "fable" in model.lower():
-                            add(agg["fable_main_vs_sub"]["subagent" if cls["is_subagent"] else "main"])
+                    def add(b):
+                        b["input"] += inp
+                        b["output"] += out
+                        b["cache_write"] += cw
+                        b["cache_read"] += cr
+                        b["turns"] += 1
+                        b["tool_turns"] += 1 if is_tool_turn else 0
+
+                    add(agg["by_model"][model])
+                    add(agg["by_profile"][label])
+                    add(agg["by_session"][skey])
+                    add(agg["by_agent"][akey])
+                    add(agg["by_hour"][ts.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:00")])
+                    add(agg["by_persona"][m["persona"]])
+                    models_seen.add(model)
+                    if "fable" in model.lower():
+                        add(agg["fable_main_vs_sub"]["subagent" if cls["is_subagent"] else "main"])
 
                 if not cls["is_subagent"]:
                     session_label[skey] = first_user or "(no user text found)"
