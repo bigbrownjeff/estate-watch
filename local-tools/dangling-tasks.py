@@ -476,7 +476,9 @@ def main():
             # handoff prose either returned unrelated lines or nothing at all,
             # and a hint that reads like a receipt is worse than none.
             ho_date = handoff_date(u["handoff"])
-            ho_str = ho_date.date().isoformat() if ho_date else "unknown"
+            # handoff_date returns a POSIX timestamp, not a datetime.
+            ho_str = (datetime.fromtimestamp(ho_date).date().isoformat()
+                      if ho_date else "unknown")
             reconcile_by = (datetime.now() + timedelta(days=14)).date().isoformat()
             detail = ("Open thread left unfiled by a session handoff.\n\n"
                       "%s\n\nhandoff: %s\nhandoff-date: %s\n"
