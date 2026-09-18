@@ -65,30 +65,30 @@
     {
       "id": "crm-private-artifact-config",
       "type": "text_contract",
+      "note": "Rewritten 2026-09-18: the 2026-08-06 CRM_WORKUPS_DIR redirect design was deliberately rejected (tests/test_workup_artifacts.py::test_environment_cannot_redirect_authority; docs/architecture.md 'Workup authority boundary'). This now asserts the rejection holds -- no .env file may reintroduce an environment-based authority override.",
       "paths": [
         "${PROJECTS}/outbound_with_jeff_and_marv/.env",
         "${PROJECTS}/outbound_with_jeff_and_marv/.env.example"
       ],
-      "required": ["^CRM_WORKUPS_DIR=~/Projects/client-pitches/pitches$"]
+      "forbidden": ["CRM_WORKUPS_DIR"]
     },
     {
       "id": "crm-private-artifact-code",
       "type": "text_contract",
+      "note": "Rewritten 2026-09-18: client-pitches was never authority for workup_artifacts.py -- commit 873cb32 (2026-08-07) shipped repo-local WORKUPS_ROOT directly and never mentioned client-pitches. This asserts the shipped repo-local contract and forbids re-adding a client-pitches authority path.",
       "paths": ["${PROJECTS}/outbound_with_jeff_and_marv/crm/workup_artifacts.py"],
       "required": [
-        "client-pitches",
-        "client-pitches-artifacts\\.v1",
-        "WORKUP_INDEX_PATH",
-        "artifact_control",
-        "approved_digest"
+        "WORKUPS_ROOT = REPO_ROOT / \"workups\"",
+        "WORKUP_INDEX_SCHEMA = \"outbound-workup-artifacts\\.v1\""
       ],
-      "forbidden": ["jeffpinto-site/pitches"]
+      "forbidden": ["client-pitches"]
     },
     {
       "id": "crm-noncanonical-workups-ignored",
       "type": "text_contract",
+      "note": "Rewritten 2026-09-18: the 2026-08-06 design treated workups/ as noncanonical and gitignored it wholesale. The shipped design deliberately TRACKS workups/ and the client-workup skill as versioned authority, ignoring only the three named hard-exclusion companies. This asserts the wholesale ignore never returns.",
       "paths": ["${PROJECTS}/outbound_with_jeff_and_marv/.gitignore"],
-      "required": [
+      "forbidden": [
         "^/workups/$",
         "^/\\.claude/skills/client-workup/$"
       ]
@@ -290,9 +290,10 @@
     {
       "id": "hygiene-audit-only",
       "type": "text_contract",
+      "note": "Rewritten 2026-09-18: the janitor call moved to --auto-safe on 2026-09-02 (README.md line 43), deliberately superseding the --dry-run-only posture. The invariant worth keeping is narrower: the scheduled wrapper must run the janitor in its safe mode and never in --apply.",
       "paths": ["${HOME}/.claude/bin/projects-hygiene.sh"],
-      "required": ["worktree-janitor.py\" --dry-run"],
-      "forbidden": ["sqlite-lint.py\" --failtask"]
+      "required": ["worktree-janitor.py\" --auto-safe"],
+      "forbidden": ["worktree-janitor.py\" --apply", "sqlite-lint.py\" --failtask"]
     },
     {
       "id": "bluecamel-site",
