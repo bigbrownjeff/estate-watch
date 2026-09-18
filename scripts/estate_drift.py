@@ -390,6 +390,25 @@ def check_skill_provenance(check: dict[str, Any]) -> dict[str, Any]:
         if not path.name.startswith(".") and (path.is_dir() or path.is_symlink())
     }
     findings: list[str] = []
+    # Not everything under the install root is a skill. `synced/` is Claude
+    # Code's own store of skills pulled from claude.ai, a directory of per-account
+    # UUID trees that changes without us. Listing such a name here excludes it
+    # from the skill comparison, but never blindly: a container must NOT carry a
+    # SKILL.md, so a real skill cannot be hidden from provenance by naming it an
+    # exemption. An unlisted non-skill directory still shows up as unmanifested,
+    # which keeps this fail-closed.
+    for container in manifest.get("containers", []):
+        name = container["name"] if isinstance(container, dict) else container
+        path = install_root / name
+        if not path.is_dir():
+            findings.append(f"{name}: declared a container but not a directory")
+            continue
+        if (path / "SKILL.md").exists():
+            findings.append(
+                f"{name}: declared a container but carries a SKILL.md; "
+                "a skill must be manifested, not exempted")
+            continue
+        actual_names.discard(name)
     if expected_names != actual_names:
         missing = sorted(actual_names - expected_names)
         absent = sorted(expected_names - actual_names)
