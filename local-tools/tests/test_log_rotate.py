@@ -70,6 +70,45 @@ class LogRotateTests(unittest.TestCase):
             roundtripped = gz.read()
         self.assertEqual(roundtripped, original, "gzip generation must round-trip to the original bytes")
 
+    def test_unreadable_generation_aborts_before_the_live_log_is_truncated(self):
+        """A generation that does not read back must cost us nothing.
+
+        Truncating is irreversible, so a gzip cut short by a full disk or a
+        killed process must abort the rotation with the live bytes still there.
+        """
+        original = os.urandom(200)
+        with open(self.path, "wb") as f:
+            f.write(original)
+
+        def short_copy(path, dest):
+            # A real gzip header and some payload, then nothing: exactly what a
+            # write that died partway through leaves behind.
+            with gzip.open(dest, "wb") as gz:
+                gz.write(original[:10])
+            with open(dest, "r+b") as fh:
+                fh.truncate(os.path.getsize(dest) - 4)
+
+        real_copy = lr._gzip_copy
+        lr._gzip_copy = short_copy
+        try:
+            messages, errors = lr.rotate_target(make_target(self.path, max_bytes=100), apply=True)
+        finally:
+            lr._gzip_copy = real_copy
+
+        self.assertTrue(errors, "a generation that will not read back must be an error")
+        self.assertIn("failed to rotate", errors[0])
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), original, "the live log must still hold every byte")
+
+    def test_verify_generation_rejects_a_short_generation(self):
+        dest = os.path.join(self.tmpdir.name, "gen.gz")
+        with gzip.open(dest, "wb") as gz:
+            gz.write(b"x" * 10)
+        self.assertEqual(lr._verify_generation(dest, 10), 10)
+        with self.assertRaises(OSError) as ctx:
+            lr._verify_generation(dest, 11)
+        self.assertIn("fewer than the 11 copied", str(ctx.exception))
+
     def test_mutation_proof_rotation_without_truncate_leaves_data(self):
         """If truncation were ever removed from rotate_target, this goes red.
 

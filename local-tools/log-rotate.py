@@ -26,7 +26,14 @@ import os
 import re
 import shutil
 import sys
+import zlib
 from typing import Dict, List, Tuple
+
+# A generation that will not read back can fail in three families: OSError for
+# the filesystem (gzip.BadGzipFile is one of these), EOFError when the stream
+# stops before its end marker, and zlib.error when the trailing CRC disagrees.
+# Catching only OSError lets a truncated gzip escape past the rotation guard.
+_UNREADABLE = (OSError, EOFError, zlib.error)
 
 # path: file to watch.
 # max_bytes: rotate when the live file exceeds this size.
@@ -46,6 +53,30 @@ _STAMP_RE = r"\d{8}T\d{6}Z"
 def _gzip_copy(path: str, dest: str) -> None:
     with open(path, "rb") as src, gzip.open(dest, "wb") as dst:
         shutil.copyfileobj(src, dst)
+
+
+def _verify_generation(dest: str, at_least: int) -> int:
+    """Stream the generation back and return its decompressed size.
+
+    Truncating the live log is irreversible, so the generation is proved readable
+    before the original loses its bytes rather than after. A gzip that was cut
+    short, or whose trailing CRC does not match, raises here and the truncate
+    never runs. `at_least` is the size measured before the copy: the log may have
+    grown during it, so the generation may be larger, never smaller.
+    """
+    total = 0
+    with gzip.open(dest, "rb") as fh:
+        while True:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+    if total < at_least:
+        raise OSError(
+            "generation %s holds %d bytes, fewer than the %d copied from the live log"
+            % (dest, total, at_least)
+        )
+    return total
 
 
 def _truncate_in_place(path: str) -> None:
@@ -88,13 +119,15 @@ def rotate_target(target: Dict, apply: bool, now: datetime.datetime = None) -> T
     if will_rotate:
         messages.append(
             f"{mode} rotate {path} ({size} bytes > {max_bytes} bytes): "
-            f"gzip copy -> {new_generation}, then truncate {path} to 0 bytes in place"
+            f"gzip copy -> {new_generation}, verify it reads back, "
+            f"then truncate {path} to 0 bytes in place"
         )
         if apply:
             try:
                 _gzip_copy(path, new_generation)
+                _verify_generation(new_generation, size)
                 _truncate_in_place(path)
-            except OSError as exc:
+            except _UNREADABLE as exc:
                 errors.append(f"failed to rotate {path}: {exc}")
                 return messages, errors
     else:
