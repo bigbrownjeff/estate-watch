@@ -33,6 +33,30 @@ class LocalChecksTest(unittest.TestCase):
         target.write_text("stale", encoding="utf-8")
         self.assertEqual("FAIL", estate_drift.run_check(check)["state"])
 
+    def test_retired_check_skips_and_carries_its_reason(self):
+        check = {
+            "id": "old-guard",
+            "type": "retired",
+            "note": "the surface it guarded is deliberately public now",
+            "retired_on": "2026-09-18",
+            "superseded_by": ["new-guard-a", "new-guard-b"],
+        }
+        outcome = estate_drift.run_check(check)
+        self.assertEqual("SKIP", outcome["state"])
+        self.assertIn("superseded by new-guard-a, new-guard-b", outcome["detail"])
+        self.assertIn("deliberately public", outcome["detail"])
+        self.assertEqual("2026-09-18", outcome["retired_on"])
+
+    def test_retired_check_never_passes(self):
+        """A tombstone asserts nothing, so it must not inflate the pass count."""
+        outcome = estate_drift.run_check({"id": "x", "type": "retired", "note": "n"})
+        self.assertNotEqual("PASS", outcome["state"])
+
+    def test_retired_check_without_a_note_says_so(self):
+        outcome = estate_drift.run_check({"id": "x", "type": "retired"})
+        self.assertEqual("SKIP", outcome["state"])
+        self.assertIn("no reason recorded", outcome["detail"])
+
     def test_text_absent_fails_closed_on_missing_coverage(self):
         check = {
             "id": "coverage",

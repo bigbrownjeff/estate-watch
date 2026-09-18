@@ -288,6 +288,26 @@ def read_text_paths(check: dict[str, Any]) -> tuple[list[tuple[str, str]], dict[
     return out, None
 
 
+def check_retired(check: dict[str, Any]) -> dict[str, Any]:
+    """A check that no longer holds, kept as a tombstone rather than deleted.
+
+    Deleting a check deletes the reason it existed, and the next audit derives
+    the same check from the same dead premise (2026-09-18: a triage lane read
+    five correctly-targeted PRs as orphaned because a repo's default branch is
+    named like a feature branch). A retired entry says what replaced it, so a
+    reader who wonders why nothing guards X finds the answer in the config
+    they are already reading.
+
+    Never PASS: a tombstone asserts nothing. SKIP keeps it out of the pass
+    count and out of the exit code.
+    """
+    detail = check.get("note") or "retired, no reason recorded"
+    superseded = check.get("superseded_by") or []
+    if superseded:
+        detail = f"superseded by {', '.join(superseded)}. {detail}"
+    return result(check, "SKIP", detail, retired_on=check.get("retired_on"))
+
+
 def check_text_absent(check: dict[str, Any]) -> dict[str, Any]:
     items, error = read_text_paths(check)
     if error:
@@ -557,6 +577,7 @@ def run_check(check: dict[str, Any], network: bool = False) -> dict[str, Any]:
         "same_file": check_same_file,
         "git_tracked": check_git_tracked,
         "runtime_receipt": check_runtime_receipt,
+        "retired": check_retired,
         "text_absent": check_text_absent,
         "text_contract": check_text_contract,
         "tree_symlinks": check_tree_symlinks,

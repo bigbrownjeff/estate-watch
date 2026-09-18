@@ -189,19 +189,10 @@
     },
     {
       "id": "reading-domain-advertising-truth",
-      "type": "text_absent",
-      "paths": [
-        "${PROJECTS}/jeffpinto-site/prototypes/reading-new-domain/README.md",
-        "${PROJECTS}/jeffpinto-site/prototypes/reading-new-domain/note.md",
-        "${PROJECTS}/jeffpinto-site/prototypes/reading-new-domain/note.html",
-        "${PROJECTS}/jeffpinto-site/prototypes/reading-new-domain/workbook.html",
-        "${PROJECTS}/jeffpinto-site/prototypes/index.html",
-        "${PROJECTS}/jeffpinto-site/docs/SOURCING.md"
-      ],
-      "patterns": [
-        "github\\.com/bigbrownjeff/reading-new-domain",
-        "bigbrownjeff\\.github\\.io/reading-new-domain"
-      ]
+      "note": "RETIRED 2026-09-18 on Jeff's ruling that the repo and workbook are deliberately public. This forbade jeffpinto.com from naming two surfaces that were supposed to be unpublished, so it existed only to keep the site from advertising a 404. The invariant it protected now lives in reading-repo-public and reading-demo-public, which go red if either surface ever stops answering. Kept as a tombstone rather than deleted so a future audit does not re-derive the same check from the same false premise.",
+      "type": "retired",
+      "retired_on": "2026-09-18",
+      "superseded_by": ["reading-repo-public", "reading-demo-public"]
     },
     {
       "id": "limina-retirement-contract",
@@ -354,18 +345,24 @@
       "allowed_final_hosts": ["jeffpinto.com", "www.jeffpinto.com"]
     },
     {
-      "id": "reading-repo-unpublished",
+      "id": "reading-repo-public",
+      "note": "Jeff 2026-09-18: deliberately public. Was asserted unpublished; the repo has been public since 2026-06-10 and jeffpinto.com links it from the live note.",
       "type": "url",
       "url": "https://github.com/bigbrownjeff/reading-new-domain",
-      "expect": "unpublished",
-      "allowed_status": [404]
+      "expect": "public",
+      "allowed_status": [200],
+      "allowed_final_hosts": ["github.com"],
+      "required_body_pattern": "bigbrownjeff/reading-new-domain"
     },
     {
-      "id": "reading-demo-unpublished",
+      "id": "reading-demo-public",
+      "note": "Jeff 2026-09-18: deliberately public. The workbook is the artifact the note sends readers to.",
       "type": "url",
       "url": "https://bigbrownjeff.github.io/reading-new-domain/workbook.html",
-      "expect": "unpublished",
-      "allowed_status": [404]
+      "expect": "public",
+      "allowed_status": [200],
+      "allowed_final_hosts": ["bigbrownjeff.github.io"],
+      "required_body_pattern": "Reading a new domain"
     },
     {
       "id": "crm-gated",
