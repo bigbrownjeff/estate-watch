@@ -102,6 +102,57 @@ class LocalChecksTest(unittest.TestCase):
         self.assertEqual("FAIL", outcome["state"])
         self.assertIn("unmanifested", outcome["detail"])
 
+    def _provenance(self, skills, containers=None):
+        """An install root with one real skill plus whatever the test adds."""
+        installs = self.root / "installs"
+        installs.mkdir(exist_ok=True)
+        source = self.root / "source"
+        source.mkdir(exist_ok=True)
+        (source / "SKILL.md").write_text("current", encoding="utf-8")
+        if not (installs / "known").exists():
+            os.symlink(source, installs / "known")
+        body = {
+            "version": 1,
+            "install_root": str(installs),
+            "skills": [{"name": "known", "mode": "symlink", "source": str(source)}] + skills,
+        }
+        if containers is not None:
+            body["containers"] = containers
+        manifest = self.root / "provenance.json"
+        manifest.write_text(json.dumps(body), encoding="utf-8")
+        return installs, {"id": "skills", "type": "skill_provenance", "manifest": str(manifest)}
+
+    def test_declared_container_is_not_counted_as_an_unmanifested_skill(self):
+        installs, check = self._provenance([], containers=[{"name": "synced", "note": "vendor"}])
+        (installs / "synced" / "uuid-a").mkdir(parents=True)
+        (installs / "synced" / "uuid-a" / "manifest.json").write_text("{}", encoding="utf-8")
+        outcome = estate_drift.run_check(check)
+        self.assertEqual("PASS", outcome["state"], outcome["detail"])
+
+    def test_a_container_carrying_a_skill_md_is_rejected(self):
+        """A skill must not escape provenance by being declared an exemption."""
+        installs, check = self._provenance([], containers=[{"name": "sneaky"}])
+        (installs / "sneaky").mkdir()
+        (installs / "sneaky" / "SKILL.md").write_text("real skill", encoding="utf-8")
+        outcome = estate_drift.run_check(check)
+        self.assertEqual("FAIL", outcome["state"])
+        self.assertIn("carries a SKILL.md", outcome["detail"])
+
+    def test_a_declared_container_that_is_not_a_directory_is_reported(self):
+        installs, check = self._provenance([], containers=[{"name": "ghost"}])
+        outcome = estate_drift.run_check(check)
+        self.assertEqual("FAIL", outcome["state"])
+        self.assertIn("not a directory", outcome["detail"])
+
+    def test_an_undeclared_non_skill_directory_still_fails_closed(self):
+        """Containers are an allowlist, so nothing is exempt by merely lacking a SKILL.md."""
+        installs, check = self._provenance([], containers=[{"name": "synced"}])
+        (installs / "synced").mkdir()
+        (installs / "stray").mkdir()
+        outcome = estate_drift.run_check(check)
+        self.assertEqual("FAIL", outcome["state"])
+        self.assertIn("unmanifested installs=stray", outcome["detail"])
+
     def test_tree_digest_ignores_python_bytecode_caches(self):
         left = self.root / "left"
         right = self.root / "right"
