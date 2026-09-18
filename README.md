@@ -42,3 +42,11 @@ wrapper. The scheduled wrapper may write its dated report and a desktop notifica
 but it never files tasks or changes repositories: SQLite lint runs without `--failtask`
 and the worktree janitor runs with `--auto-safe` (since 2026-09-02: it removes only worktrees that are merged, clean and fully on origin; everything else is listed for a human). Synchronize/check the installed
 copies with `scripts/sync-local-tools.sh --install|--check`.
+
+`local-tools/log-rotate.py` is the versioned source for rotate-with-retention on logs
+that grow without bound (board#1125: `/opt/homebrew/var/log/ollama.log` had no rotation
+of any kind and is the only record of ollama model usage, so it is copy-truncated and
+gzipped with retention, never deleted outright). Targets are a data table at the top of
+the file; ollama's is `max_bytes` 64 MB, `keep` 6 generations. `com.jeffpinto.log-rotate`
+(launchd/com.jeffpinto.log-rotate.plist) runs it with `--apply` daily; `--dry-run` is the
+default with no flags and writes nothing.

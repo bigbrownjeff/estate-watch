@@ -35,6 +35,8 @@ rows=(
   "local-tools/dangling-tasks.py|$HOME/.claude/bin/dangling-tasks.py|0755"
   "local-tools/prompt-maestro-weekly.sh|$HOME/.claude/bin/prompt-maestro-weekly.sh|0755"
   "local-tools/tests/test_prompt_maestro_weekly.sh|$HOME/.claude/bin/tests/test_prompt_maestro_weekly.sh|0755"
+  "local-tools/log-rotate.py|$HOME/.claude/bin/log-rotate.py|0755"
+  "local-tools/tests/test_log_rotate.py|$HOME/.claude/bin/tests/test_log_rotate.py|0755"
 )
 
 case "$mode" in
