@@ -65,30 +65,30 @@
     {
       "id": "crm-private-artifact-config",
       "type": "text_contract",
+      "note": "Rewritten 2026-09-18: the 2026-08-06 CRM_WORKUPS_DIR redirect design was deliberately rejected (tests/test_workup_artifacts.py::test_environment_cannot_redirect_authority; docs/architecture.md 'Workup authority boundary'). This now asserts the rejection holds -- no .env file may reintroduce an environment-based authority override.",
       "paths": [
         "${PROJECTS}/outbound_with_jeff_and_marv/.env",
         "${PROJECTS}/outbound_with_jeff_and_marv/.env.example"
       ],
-      "required": ["^CRM_WORKUPS_DIR=~/Projects/client-pitches/pitches$"]
+      "forbidden": ["CRM_WORKUPS_DIR"]
     },
     {
       "id": "crm-private-artifact-code",
       "type": "text_contract",
+      "note": "Rewritten 2026-09-18: client-pitches was never authority for workup_artifacts.py -- commit 873cb32 (2026-08-07) shipped repo-local WORKUPS_ROOT directly and never mentioned client-pitches. This asserts the shipped repo-local contract and forbids re-adding a client-pitches authority path.",
       "paths": ["${PROJECTS}/outbound_with_jeff_and_marv/crm/workup_artifacts.py"],
       "required": [
-        "client-pitches",
-        "client-pitches-artifacts\\.v1",
-        "WORKUP_INDEX_PATH",
-        "artifact_control",
-        "approved_digest"
+        "WORKUPS_ROOT = REPO_ROOT / \"workups\"",
+        "WORKUP_INDEX_SCHEMA = \"outbound-workup-artifacts\\.v1\""
       ],
-      "forbidden": ["jeffpinto-site/pitches"]
+      "forbidden": ["client-pitches"]
     },
     {
       "id": "crm-noncanonical-workups-ignored",
       "type": "text_contract",
+      "note": "Rewritten 2026-09-18: the 2026-08-06 design treated workups/ as noncanonical and gitignored it wholesale. The shipped design deliberately TRACKS workups/ and the client-workup skill as versioned authority, ignoring only the three named hard-exclusion companies. This asserts the wholesale ignore never returns.",
       "paths": ["${PROJECTS}/outbound_with_jeff_and_marv/.gitignore"],
-      "required": [
+      "forbidden": [
         "^/workups/$",
         "^/\\.claude/skills/client-workup/$"
       ]
@@ -101,34 +101,26 @@
     },
     {
       "id": "crm-runtime-approval",
-      "type": "runtime_receipt",
-      "root": "${PROJECTS}/outbound_with_jeff_and_marv",
-      "receipt": "${HOME}/.local/share/outbound-crm/approved-runtime.receipt",
-      "schema": "outbound-crm-runtime-approval.v1",
-      "branch": "main",
-      "source_launcher": "${PROJECTS}/outbound_with_jeff_and_marv/local-tools/outbound-crm-serve.sh",
-      "installed_launcher": "${HOME}/.local/bin/outbound-crm-serve.sh",
-      "python": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
-      "test_command": "PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover -s tests -v",
-      "dirs": ["crm", "config", "manifestos", "references", "templates"],
-      "files": [
-        ".env",
-        "local-tools/outbound-crm-serve.sh",
-        "scripts/runtime_fingerprint.py"
-      ]
+      "note": "RETIRED 2026-09-18 on Jeff's ruling. This asserted a signed runtime-approval receipt that the CRM launcher required before starting: nine pinned keys, a runtime fingerprint, and a hash of the launcher against both the running copy and its source. The receipt was never created, so the strict launcher could never start the service, and on 2026-08-26 a weaker script was installed into ~/.local/bin and run instead. The design was abandoned in practice six weeks before it was abandoned on paper. harajlim/outbound_with_jeff_and_marv#624 makes the installed launcher the versioned one and turns its clean-checkout refusal on by default, so there is no receipt left to check. What still matters, that the installed launcher matches its source, is crm-launcher-install, which is a separate live check and is the one that caught this.",
+      "type": "retired",
+      "retired_on": "2026-09-18",
+      "superseded_by": ["crm-launcher-install"]
     },
     {
       "id": "crm-runtime-approval-contract",
+      "note": "Rewritten 2026-09-18 for the launcher that shipped in harajlim/outbound_with_jeff_and_marv#624. The four receipt strings this used to require are gone with the receipt design. The three refusals below survive because they are the ones that ever ran. The clean-checkout default is required in its exact form: the bypassed launcher carried CRM_RUNTIME_REQUIRE_CLEAN:-0, so the gate read as present in the source while being off in production, and forbidding that spelling is what stops it returning.",
       "type": "text_contract",
       "paths": ["${PROJECTS}/outbound_with_jeff_and_marv/local-tools/outbound-crm-serve.sh"],
       "required": [
-        "approved-runtime\\.receipt",
-        "outbound-crm-runtime-approval\\.v1",
-        "runtime_sha256",
-        "launcher_sha256",
+        "\\$\\{CRM_RUNTIME_REQUIRE_CLEAN:-1\\}",
+        "--untracked-files=all",
         "checkout is dirty; refusing startup",
         "runtime_fingerprint\\.py",
         "authentication is not configured; refusing startup"
+      ],
+      "forbidden": [
+        "CRM_RUNTIME_REQUIRE_CLEAN:-0",
+        "approved-runtime\\.receipt"
       ]
     },
     {
@@ -290,9 +282,10 @@
     {
       "id": "hygiene-audit-only",
       "type": "text_contract",
+      "note": "Rewritten 2026-09-18: the janitor call moved to --auto-safe on 2026-09-02 (README.md line 43), deliberately superseding the --dry-run-only posture. The invariant worth keeping is narrower: the scheduled wrapper must run the janitor in its safe mode and never in --apply.",
       "paths": ["${HOME}/.claude/bin/projects-hygiene.sh"],
-      "required": ["worktree-janitor.py\" --dry-run"],
-      "forbidden": ["sqlite-lint.py\" --failtask"]
+      "required": ["worktree-janitor.py\" --auto-safe"],
+      "forbidden": ["worktree-janitor.py\" --apply", "sqlite-lint.py\" --failtask"]
     },
     {
       "id": "bluecamel-site",
