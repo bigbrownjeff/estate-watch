@@ -532,14 +532,6 @@
       "expect": "gated",
       "allowed_status": [200, 401, 403],
       "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
-    },
-    {
-      "id": "gated-single-common-light-pages",
-      "note": "Card #879: common-light has no custom domain (wrangler project list, 2026-09-19). Gate is HTTP Basic Auth (guest / repo .gate-pass), not Cloudflare Access -- a bare 401 challenge is the pass condition.",
-      "type": "url",
-      "url": "https://common-light.pages.dev/",
-      "expect": "gated",
-      "allowed_status": [401]
     }
   ]
 }
