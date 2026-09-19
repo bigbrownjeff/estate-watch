@@ -11,7 +11,8 @@ outside a main loop (with the brief that spawned it), and the hourly rate.
 It is the event-time answer to the 2026-08-27/28 forensic: two sessions burned
 97% of two days' tokens and nothing noticed until a hand audit. Thresholds live
 in ~/.claude/failures/sentinel-config.json under "burn"; a breach files a
-failtask card (deduped per agent/session per day) so it lands on the board.
+failtask card so it lands on the board; a turn-cap breach already filed at the same
+or a higher turn count is not handed to failtask again (see split_unchanged).
 
 Read-only on transcripts. Writes only its own report under
 ~/.claude/failures/burn/ and, on a breach, a board card via failtask.
@@ -39,6 +40,7 @@ FAILDIR = os.path.join(HOME, ".claude", "failures")
 CONFIG = os.path.join(FAILDIR, "sentinel-config.json")
 BURN_DIR = os.path.join(FAILDIR, "burn")
 FAILTASK = os.path.join(HOME, ".claude", "bin", "failtask")
+FAILURES_JSONL = os.path.join(FAILDIR, "failures.jsonl")
 
 ROOTS = {
     "claude (jeffpinto.com)": os.path.join(HOME, ".claude", "projects"),
@@ -418,6 +420,7 @@ def find_breaches(agg, cfg, hours):
             # every later day it was observed: three identical cards for one agent
             # (2026-09-11 walk). Rollups below stay day-scoped; they really are daily.
             "key": f"burn:agent:{aid}",
+            "evidence": {aid: b["tool_turns"]},
             "title": f"burn: agent ran {b['tool_turns']:,} tool turns (cap {cap}) — {human(total(b))} tokens",
             "detail": (
                 f"Agent {aid} ran {b['tool_turns']:,} tool turns / {b['turns']:,} assistant turns "
@@ -438,7 +441,10 @@ def find_breaches(agg, cfg, hours):
 
     if len(over_cap) > max_cards:
         rest = over_cap[max_cards:]
-        lines = []
+        lines, evidence = [], {}
+        for akey, b in rest:
+            info = agg["agent_info"].get(akey, {})
+            evidence[info.get("agent_id") or akey.split("::")[-1]] = b["tool_turns"]
         for akey, b in rest[:60]:
             info = agg["agent_info"].get(akey, {})
             desc, where = agent_label(info)
@@ -448,6 +454,7 @@ def find_breaches(agg, cfg, hours):
         out.append({
             "project": cfg["project"], "severity": "warn",
             "key": f"burn:agent-rollup:{day}",
+            "evidence": evidence,
             "title": f"burn: {len(rest)} more agents past the {cap}-tool-turn cap "
                      f"(top {max_cards} filed separately)",
             "detail": (
@@ -457,7 +464,9 @@ def find_breaches(agg, cfg, hours):
                 + "\n".join(lines) + more + "\n\n"
                 "Fix is upstream, not per-agent: every brief carries the stop-at-the-cap "
                 "clause and the coordinator re-spawns with a short fresh brief.\n"
-                "Filed by ~/.claude/bin/burn-meter.py (rides inside fleet-sentinel)."),
+                "Filed by ~/.claude/bin/burn-meter.py (rides inside fleet-sentinel).\n"
+                # read back by filed_turns(); one id:turns pair per rolled-up agent
+                "agents: " + " ".join(f"{a}:{t}" for a, t in evidence.items())),
         })
 
     for (prof, sid), b in sorted(agg["by_session"].items(), key=lambda kv: -total(kv[1])):
@@ -501,6 +510,66 @@ def find_breaches(agg, cfg, hours):
                 "Filed by ~/.claude/bin/burn-meter.py (rides inside fleet-sentinel)."),
         })
     return out
+
+
+TURNS_RE = re.compile(r"ran ([\d,]+) tool turns")
+AGENTS_RE = re.compile(r"^agents: (.*)$", re.M)
+
+
+def filed_turns(jsonl_path=FAILURES_JSONL):
+    """Highest tool-turn count already handed to failtask, per agent id.
+
+    Read from failtask's own record of every call (failures.jsonl), so there is
+    no second store: an agent card's title carries its count, a rollup's detail
+    carries an `agents: id:turns ...` line. A missing or unreadable file means
+    nothing is known and everything files."""
+    known = {}
+
+    def note(aid, turns):
+        if turns > known.get(aid, -1):
+            known[aid] = turns
+
+    try:
+        f = open(jsonl_path)
+    except OSError:
+        return known
+    with f:
+        for raw in f:
+            if '"burn:agent' not in raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            key = rec.get("key") or ""
+            if key.startswith("burn:agent:"):
+                m = TURNS_RE.search(rec.get("title") or "")
+                if m:
+                    note(key[len("burn:agent:"):], int(m.group(1).replace(",", "")))
+            elif key.startswith("burn:agent-rollup:"):
+                m = AGENTS_RE.search(rec.get("detail") or "")
+                for pair in (m.group(1).split() if m else []):
+                    aid, _, turns = pair.rpartition(":")
+                    if aid and turns.isdigit():
+                        note(aid, int(turns))
+    return known
+
+
+def split_unchanged(breaches, known):
+    """(to_file, unchanged). A turn-cap card whose every agent was already filed at
+    this turn count or higher is not handed to failtask again: once heal-sweep
+    closes it, failtask would reopen it (or, with a blind cache, file a duplicate)
+    on every run the agent stays in the 24h window (2026-09-17: the same five
+    agents filed at 12:00 and again at 20:00). An agent whose count grew, or a
+    rollup naming any agent not filed before, still files."""
+    to_file, unchanged = [], []
+    for br in breaches:
+        ev = br.get("evidence")
+        if ev and all(t <= known.get(aid, -1) for aid, t in ev.items()):
+            unchanged.append(br)
+        else:
+            to_file.append(br)
+    return to_file, unchanged
 
 
 def file_cards(breaches, dry_run):
@@ -579,13 +648,16 @@ def main():
         except OSError as e:
             sys.stderr.write(f"burn-meter: could not write {report_path}: {e}\n")
 
-    filed = file_cards(breaches, dry_run) if (breaches and not no_file) else 0
+    to_file, unchanged = split_unchanged(breaches, filed_turns())
+    for br in unchanged:
+        print(f"  unchanged since filed, not re-filed: {br['key']} ({br['title']})")
+    filed = file_cards(to_file, dry_run) if (to_file and not no_file) else 0
 
     # The estate line: what fleet-sentinel and the board see.
     where = "no report written (dry-run)" if dry_run else f"report {report_path}"
     print(f"burn-meter: {human(grand)} tokens / {turns:,} turns over {hours:.0f}h — "
           f"{len(breaches)} threshold breach(es), {filed} card(s) "
-          f"{'(dry-run)' if dry_run else 'filed'} — {where}")
+          f"{'(dry-run)' if dry_run else 'filed'}, {len(unchanged)} unchanged since filed — {where}")
     return 0
 
 
