@@ -180,3 +180,17 @@ recommended for anything written after 2026-09-07. `--check` reports every file 
 `status:` as `PROVENANCE missing status` and exits 1. The 2026-09-07 backfill set
 `status: active` on 291 profile and 496 persona memories. Stores that resolve to the same
 directory (the symlinked sisters) are scanned once.
+
+**Default stamp (2026-09-19).** The harness writes new memories with `name`, `description`
+and `metadata.type` only, so the gate went red every day a memory was written (23 stamped
+by hand on 09-15, 21 more by 09-19). `--scheduled` and `--apply` now stamp `status: active`
+on each memory that lacks one, before the sync scan: snapshot first, one inserted line
+under `metadata:` (top level if there is none), proven lossless by `superset()`, written
+with `atomic_write(expect=)`, logged as `stamped  status: active  <profile>: <file>`, and
+skipped for a file touched in the last `FRESH_SECONDS`. The gate keeps its purpose: a
+memory whose frontmatter says it is superseded or retired (a `superseded_by:` key, or those
+words in `description`), or that is not valid UTF-8 or parseable, is never defaulted; it
+fails `--check` at once and `--scheduled` files a board card. A plain memory younger than
+`STAMP_GRACE_SECONDS` (26 hours, the daily 08:45 run plus slack) prints as `provenance
+pending` without failing; older and still unstamped fails, which means the stamping run is
+not running.
