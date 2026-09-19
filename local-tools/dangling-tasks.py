@@ -44,6 +44,13 @@ HOME = os.path.expanduser("~")
 CACHE = os.path.join(HOME, ".claude", "failures", "board-cache.json")
 FAILTASK = os.path.join(HOME, ".claude", "bin", "failtask")
 CACHE_TTL = 900  # s
+# board-cache.json is SHARED with failtask (same path, same {"v": 2, "items": [...]}
+# shape) which dedupes filing against it. failtask hit this exact bug at 1000 items
+# (ledger 33: "gh item-list TRUNCATED ... raise LIST_LIMIT") and fixed it by raising
+# its own limit to 5000 and refusing to trust a short pull. Mirror both halves of
+# that fix here rather than re-deriving them: a truncated write from THIS tool is
+# just as blinding to failtask's dedupe as a truncated write from failtask itself.
+LIST_LIMIT = "5000"
 CUTOFF = 0.72
 
 # T-1742: the private repo real Issues live in. Single constant, same override
@@ -288,7 +295,7 @@ def board_items(use_cache=True):
         return [], "no-gh"
     try:
         r = subprocess.run([gh, "project", "item-list", "1", "--owner", "bigbrownjeff",
-                            "--limit", "1000", "--format", "json"],
+                            "--limit", LIST_LIMIT, "--format", "json"],
                            capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
             # Fall back to a stale cache rather than reporting an empty board:
@@ -297,7 +304,24 @@ def board_items(use_cache=True):
                 d = json.load(open(CACHE))
                 return d.get("items") or [], "stale-cache"
             return [], "gh-failed"
-        items = json.loads(r.stdout).get("items") or []
+        payload = json.loads(r.stdout)
+        items = payload.get("items") or []
+        total = payload.get("totalCount")
+        if isinstance(total, int) and total > len(items):
+            # Same truncation failtask's LIST_LIMIT fix targeted (ledger 33): say
+            # so loudly, and never let a short pull clobber a fuller cache that
+            # failtask's own dedupe depends on.
+            print("dangling-tasks: gh item-list TRUNCATED: %d of %d items — "
+                  "refusing to overwrite the shared board-cache.json (raise LIST_LIMIT)"
+                  % (len(items), total), file=sys.stderr)
+            if os.path.exists(CACHE):
+                try:
+                    stale = json.load(open(CACHE)).get("items") or []
+                    if len(stale) >= len(items):
+                        return stale, "stale-cache-fuller"
+                except Exception:
+                    pass
+            return items, "live-truncated"
         try:
             json.dump({"v": 2, "items": items}, open(CACHE, "w"))
         except Exception:
