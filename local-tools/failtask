@@ -55,6 +55,7 @@ elif [ "$FT_PROJECT" = "--stuck-report" ]; then
 else
   if [ -z "$FT_PROJECT" ] || [ -z "$FT_TITLE" ]; then
     echo "failtask: usage: failtask <project> \"<title>\" [--detail ...] [--dedupe-key KEY] [--severity warn|error] [--no-escalate]" >&2
+    echo "failtask: also: failtask --stuck-report | failtask --drain" >&2
     exit 0   # even usage errors must not break the caller
   fi
   shift 2
@@ -298,11 +299,19 @@ def cache_sync(items):
 # ------------------------------------------------------------------ board ops
 
 def find_match(items, marker):
-    """(open_item, done_item) — first match of each kind for this failkey."""
+    """(open_item, done_item) — first match of each kind for this failkey.
+
+    The marker must match a WHOLE line, not just be a substring: a plain
+    `in` check makes "failkey: stuck:foo" match a body carrying
+    "failkey: stuck:foo-bar" too, so a prefix-pair of keys (foo / foo-bar)
+    silently collides and the shorter key's escalation gets swallowed by
+    the longer key's card. Checked as "any line equals marker" rather than
+    body.endswith(marker): reopen() can append a "recurred: <ts>" line
+    after the marker, so the marker is not always the last line."""
     open_hit = done_hit = None
     for it in items:
         body = (it.get("content") or {}).get("body", "") or ""
-        if marker not in body:
+        if not any(line.strip() == marker for line in body.splitlines()):
             continue
         if it.get("status") == "Done":
             if done_hit is None:
@@ -576,14 +585,22 @@ def read_failure_rows(path):
                 yield row
 
 def _row_dt(row):
-    """Parsed ts, or None for a missing/unparsable one (never raises)."""
+    """Parsed ts, or None for a missing/unparsable one (never raises).
+    Normalized to aware: a tz-naive ts (fromisoformat parses one fine on
+    3.9, it never raises) would otherwise TypeError the first time it is
+    compared or subtracted against an aware ts from any other row, which
+    takes down the whole scan for every OTHER key too, not just this row.
+    astimezone() on a naive datetime presumes system local time."""
     ts = row.get("ts")
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(ts)
     except Exception:
         return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt
 
 def stuck_eligible(row):
     """A row can only ever count toward escalation, or appear in
@@ -767,12 +784,12 @@ def stuck_report(now=None):
 # ----------------------------------------------------------------------- main
 
 def main():
-    os.makedirs(FAILDIR, exist_ok=True)
     project  = os.environ["FT_PROJECT"]
     title    = os.environ["FT_TITLE"]
     if project == "__stuck_report__":
-        stuck_report()
+        stuck_report()  # reads FAILDIR/JSONL only; must not create it (docstring: "writes nothing")
         return
+    os.makedirs(FAILDIR, exist_ok=True)
     drain_only  = (project == "__drain__")
     no_escalate = os.environ.get("FT_NO_ESCALATE") == "1"
     detail   = os.environ.get("FT_DETAIL", "")

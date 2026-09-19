@@ -127,6 +127,32 @@ class StuckReportTests(unittest.TestCase):
         self.assertIn("key=dense:five", r.stdout)
         self.assertIn("days=5/14", r.stdout)
 
+    def test_9c_naive_ts_on_a_shared_key_does_not_blind_the_report_to_other_keys(self):
+        # BLOCKER: a key with one aware and one naive ts row used to TypeError
+        # ("can't compare offset-naive and offset-aware datetimes") deep inside
+        # all_stuck_candidates(), caught only by main()'s top-level try/except,
+        # which made the WHOLE report print zero lines — not just for this key,
+        # for every other key in the file too. Mutation proof: drop the
+        # tzinfo-is-None normalization in _row_dt() and this goes RED (empty
+        # stdout, INTERNAL ERROR on stderr, "healthy:key" absent).
+        lines = [make_row("healthy:key", d, title="Healthy") for d in (0, 3, 6, 9, 13)]
+        aware_naive_pair_ts = [
+            json.dumps({"ts": iso_days_ago(1), "project": "p", "title": "Mixed",
+                        "detail": "", "key": "mixed:key", "severity": "warn",
+                        "label": "FAILURE", "host": "h"}),
+            # same key, no tz offset at all — parses fine via fromisoformat on 3.9,
+            # never raises there, only on later comparison against an aware row.
+            json.dumps({"ts": datetime.now().replace(microsecond=0).isoformat(),
+                        "project": "p", "title": "Mixed", "detail": "",
+                        "key": "mixed:key", "severity": "warn",
+                        "label": "FAILURE", "host": "h"}),
+        ]
+        r = run_stuck_report(lines + aware_naive_pair_ts)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("INTERNAL ERROR", r.stderr, r.stderr)
+        self.assertIn("key=healthy:key", r.stdout, r.stdout)
+        self.assertIn("days=5/14", r.stdout, r.stdout)
+
 
 # --------------------------------------------------------------- EMBEDDED harness
 
@@ -199,6 +225,43 @@ def write_failure_rows(path, rows):
     with open(path, "w") as f:
         for row in rows:
             f.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+class FindMatchWholeLineMarkerTests(unittest.TestCase):
+    """BLOCKER: find_match()'s marker match must be a whole line, not a
+    substring. A plain `marker not in body` check makes "failkey: stuck:foo"
+    match a body carrying "failkey: stuck:foo-bar" too, so a live prefix pair
+    of keys (foo / foo-bar) collides: the shorter key's escalation silently
+    finds the longer key's card, returns "dupe", and files nothing. Mutation
+    proof: revert find_match() to `if marker not in body: continue` and the
+    prefix lookup below wrongly matches -> RED."""
+
+    def test_prefix_pair_keys_do_not_collide_in_find_match(self):
+        ns, _ = load_module()
+        find_match = ns["find_match"]
+        items = [{"id": "PVTI_longer", "status": "Todo",
+                  "content": {"type": "Issue", "id": "I_x",
+                              "body": "ctx\nfailkey: stuck:console-tap-drain-refused-rows\nmore"}}]
+        # The SHORT key must NOT match the card filed for the LONG key that
+        # starts with the same text.
+        open_hit, done_hit = find_match(items, "failkey: stuck:console-tap-drain-refused")
+        self.assertIsNone(open_hit, "short key wrongly matched the longer key's card")
+        self.assertIsNone(done_hit)
+        # The long key's own exact marker must still match its own card.
+        open_hit2, _ = find_match(items, "failkey: stuck:console-tap-drain-refused-rows")
+        self.assertEqual(open_hit2.get("id"), "PVTI_longer")
+
+    def test_marker_matches_when_not_the_last_line(self):
+        # reopen() appends "recurred: <ts>" after the marker line, so the
+        # marker is not always body's last line — a body.endswith() fix
+        # would be just as wrong as the substring check.
+        ns, _ = load_module()
+        find_match = ns["find_match"]
+        items = [{"id": "PVTI_x", "status": "Todo",
+                  "content": {"type": "Issue", "id": "I_x",
+                              "body": "ctx\nfailkey: plainkey\nrecurred: 2026-09-19T00:00:00+00:00"}}]
+        open_hit, _ = find_match(items, "failkey: plainkey")
+        self.assertEqual(open_hit.get("id"), "PVTI_x")
 
 
 class EscalationDecisionTests(unittest.TestCase):
