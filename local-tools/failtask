@@ -27,6 +27,20 @@
 # with no Status is invisible to every saved view.
 #
 # FAILTASK_DRY_RUN=1 prints the gh write commands instead of running them (reads still run).
+#
+# Age escalation (2026-09-19): a recurrence (dupe/reopened outcome) whose failkey
+# is red on FAILTASK_STUCK_DAYS or more distinct local calendar days within the
+# last FAILTASK_STUCK_WINDOW_DAYS days (from failures.jsonl) also files ONE
+# escalation card, dedupe key "stuck:<original key>", label STANDING. Density,
+# not a streak, so a flapping check still escalates. Env knobs:
+#   FAILTASK_STUCK_DAYS=N        distinct-day threshold to escalate (default 5)
+#   FAILTASK_STUCK_WINDOW_DAYS=N lookback window in days (default 14)
+#   FAILTASK_STUCK_DAYS=0        pause switch: disables escalation entirely
+# Per-call opt-out: --no-escalate. Never evaluated on --drain, on a "created"
+# outcome, when the board is unreachable, on a key already prefixed "stuck:",
+# or on a row whose --label isn't FAILURE.
+# `failtask --stuck-report` prints, from failures.jsonl alone (no board, no gh,
+# no writes), every key that would escalate right now.
 set -u
 
 FT_PROJECT="${1:-}"; FT_TITLE="${2:-}"
@@ -34,31 +48,36 @@ if [ "$FT_PROJECT" = "--drain" ]; then
   # maintenance mode: only drain the pending-board queue, file nothing new
   FT_PROJECT="__drain__"; FT_TITLE="__drain__"
   set --
+elif [ "$FT_PROJECT" = "--stuck-report" ]; then
+  # report-only mode: read failures.jsonl, print what would escalate, touch nothing else
+  FT_PROJECT="__stuck_report__"; FT_TITLE="__stuck_report__"
+  set --
 else
   if [ -z "$FT_PROJECT" ] || [ -z "$FT_TITLE" ]; then
-    echo "failtask: usage: failtask <project> \"<title>\" [--detail ...] [--dedupe-key KEY] [--severity warn|error]" >&2
+    echo "failtask: usage: failtask <project> \"<title>\" [--detail ...] [--dedupe-key KEY] [--severity warn|error] [--no-escalate]" >&2
     exit 0   # even usage errors must not break the caller
   fi
   shift 2
 fi
-FT_DETAIL=""; FT_KEY=""; FT_SEVERITY="error"; FT_LABEL="FAILURE"
+FT_DETAIL=""; FT_KEY=""; FT_SEVERITY="error"; FT_LABEL="FAILURE"; FT_NO_ESCALATE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --detail)     FT_DETAIL="${2:-}"; shift 2 || shift ;;
-    --dedupe-key) FT_KEY="${2:-}"; shift 2 || shift ;;
-    --severity)   FT_SEVERITY="${2:-error}"; shift 2 || shift ;;
-    --label)      FT_LABEL="${2:-FAILURE}"; shift 2 || shift ;;
+    --detail)      FT_DETAIL="${2:-}"; shift 2 || shift ;;
+    --dedupe-key)  FT_KEY="${2:-}"; shift 2 || shift ;;
+    --severity)    FT_SEVERITY="${2:-error}"; shift 2 || shift ;;
+    --label)       FT_LABEL="${2:-FAILURE}"; shift 2 || shift ;;
+    --no-escalate) FT_NO_ESCALATE=1; shift ;;
     *) echo "failtask: ignoring unknown arg: $1" >&2; shift ;;
   esac
 done
-export FT_PROJECT FT_TITLE FT_DETAIL FT_KEY FT_SEVERITY FT_LABEL
+export FT_PROJECT FT_TITLE FT_DETAIL FT_KEY FT_SEVERITY FT_LABEL FT_NO_ESCALATE
 
 PY=/usr/bin/python3
 [ -x "$PY" ] || PY="$(command -v python3 2>/dev/null || echo /usr/bin/python3)"
 
 "$PY" - <<'PYEOF'
 import contextlib, fcntl, hashlib, json, os, re, socket, subprocess, sys, time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 FAILDIR = os.path.expanduser("~/.claude/failures")
 JSONL   = os.path.join(FAILDIR, "failures.jsonl")
@@ -499,13 +518,263 @@ def board_create(gh_bin, rec, items, tax):
                       "id": item_id})
     return "created", item_id
 
+# ------------------------------------------------------------ age escalation
+#
+# A dupe/reopened outcome means this failkey already has a standing board
+# card; recurrence 240 reads exactly like recurrence 1 and nothing measures
+# how long a condition has been red (Lantern's shelf alarm fired hourly for
+# 16 days this way; lantern-cloud #685 fixed it locally, this is the
+# estate-wide version). We measure red DENSITY: distinct local calendar
+# days with a row in the window, today included. Never an unbroken streak:
+# a check that flaps (red every other day) is exactly the case a streak
+# counter misses.
+
+STUCK_PREFIX = "stuck:"
+STUCK_LABEL = "STANDING"
+
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log("%s=%r is not an integer; using default %d" % (name, raw, default))
+        return default
+
+def stuck_window_days():
+    return _env_int("FAILTASK_STUCK_WINDOW_DAYS", 14)
+
+def stuck_days_threshold():
+    return _env_int("FAILTASK_STUCK_DAYS", 5)
+
+def now_local():
+    return datetime.now(timezone.utc).astimezone()
+
+def read_failure_rows(path):
+    """Yield every well-formed JSON object in the JSONL log. A line that
+    isn't valid JSON is skipped, never raised. The log is written by many
+    callers over years and a malformed line must not blind the escalation
+    check to every OTHER key in the file."""
+    try:
+        f = open(path)
+    except FileNotFoundError:
+        return
+    except Exception as e:
+        log("stuck: cannot open %s: %s" % (path, e))
+        return
+    with f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(row, dict):
+                yield row
+
+def _row_dt(row):
+    """Parsed ts, or None for a missing/unparsable one (never raises)."""
+    ts = row.get("ts")
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except Exception:
+        return None
+
+def stuck_eligible(row):
+    """A row can only ever count toward escalation, or appear in
+    --stuck-report, if it has a key, isn't itself an escalation row, and is
+    labeled FAILURE (the dangling-tasks lint files "OPEN THREAD" cards
+    through this same tool and those never escalate)."""
+    key = row.get("key") or ""
+    label = row.get("label") or "FAILURE"
+    return bool(key) and not key.startswith(STUCK_PREFIX) and label == "FAILURE"
+
+def key_stuck_stats(jsonl_path, key, window_days, now=None):
+    """One pass of the log for a single key: (days_in_window, rows_in_window,
+    first_seen). days_in_window is a set of date()s inside the window
+    (today included); first_seen is the earliest dated row for this key in
+    the WHOLE log, not just the window, so the card can say how long the
+    condition has really been going on. Rows with no parsable ts don't count
+    toward either and don't break the scan."""
+    now = now or now_local()
+    today = now.date()
+    start = today - timedelta(days=window_days - 1)
+    days, rows_in_window, first_seen = set(), 0, None
+    for row in read_failure_rows(jsonl_path):
+        if row.get("key") != key:
+            continue
+        dt = _row_dt(row)
+        if dt is None:
+            continue
+        d = dt.date()
+        if first_seen is None or d < first_seen:
+            first_seen = d
+        if start <= d <= today:
+            days.add(d)
+            rows_in_window += 1
+    return days, rows_in_window, first_seen
+
+def all_stuck_candidates(jsonl_path, window_days, now=None):
+    """One pass over the whole log (used only by --stuck-report, never on the
+    hot path). {key: {days, rows_in_window, first_seen, last_dt, project,
+    title}} for every eligible key that has at least one dated row."""
+    now = now or now_local()
+    today = now.date()
+    start = today - timedelta(days=window_days - 1)
+    out = {}
+    for row in read_failure_rows(jsonl_path):
+        if not stuck_eligible(row):
+            continue
+        dt = _row_dt(row)
+        if dt is None:
+            continue
+        d = dt.date()
+        key = row["key"]
+        st = out.get(key)
+        if st is None:
+            st = {"days": set(), "rows_in_window": 0, "first_seen": d, "last_dt": dt,
+                  "project": row.get("project", ""), "title": row.get("title", "")}
+            out[key] = st
+        elif d < st["first_seen"]:
+            st["first_seen"] = d
+        if start <= d <= today:
+            st["days"].add(d)
+            st["rows_in_window"] += 1
+        if dt > st["last_dt"]:
+            st["last_dt"] = dt
+            st["project"] = row.get("project", st["project"])
+            st["title"] = row.get("title", st["title"])
+    return out
+
+def should_escalate(rec, outcome, no_escalate):
+    if no_escalate or outcome not in ("dupe", "reopened"):
+        return False
+    if (rec.get("label") or "FAILURE") != "FAILURE":
+        return False
+    if (rec.get("key") or "").startswith(STUCK_PREFIX):
+        return False
+    return stuck_days_threshold() > 0   # FAILTASK_STUCK_DAYS=0 is the pause switch
+
+def maybe_escalate(gh_bin, rec, outcome, items, tax, no_escalate, now=None):
+    """Best-effort: files one STANDING escalation card, through the same
+    board_create() path (so it gets dedupe/reopen for free), when this
+    call's failkey is red on enough distinct days. Reuses the `items` this
+    process already fetched, no second board fetch. Never raises; a caller
+    wraps this anyway (record_outcome) but the guarantee lives here too."""
+    try:
+        if not should_escalate(rec, outcome, no_escalate):
+            return
+        window = stuck_window_days()
+        threshold = stuck_days_threshold()
+        now = now or now_local()
+        days, rows_in_window, first_seen = key_stuck_stats(JSONL, rec["key"], window, now)
+        if len(days) < threshold:
+            return
+        stuck_key = STUCK_PREFIX + rec["key"]
+        figures = ("red on %d of the last %d days (as of %s, from failures.jsonl); "
+                   "first seen %s; %d rows in the window; original failkey %s"
+                   % (len(days), window, now.date().isoformat(),
+                      first_seen.isoformat() if first_seen else "unknown",
+                      rows_in_window, rec["key"]))
+        detail = figures + (("\n\nlatest detail:\n" + rec["detail"]) if rec.get("detail") else "")
+        stuck_rec = {
+            "ts": rec["ts"], "project": rec["project"], "title": rec["title"],
+            "detail": detail, "key": stuck_key, "severity": "error",
+            "label": STUCK_LABEL, "host": rec["host"],
+        }
+        outcome2, item_id = board_create(gh_bin, stuck_rec, items, tax)
+        if outcome2 == "dupe":
+            stuck_rec["dedupe_hit"] = True
+        elif outcome2 == "reopened":
+            stuck_rec["board_item"] = item_id
+            stuck_rec["reopened"] = True
+        elif outcome2 == "created":
+            stuck_rec["board_item"] = item_id
+        else:
+            stuck_rec["pending_board"] = True
+            append_jsonl(PENDING, stuck_rec)
+        append_jsonl(JSONL, stuck_rec)
+        log("STUCK escalation for failkey %s: %s (red %d/%d days)" % (rec["key"], outcome2, len(days), window))
+    except Exception as e:
+        log("stuck escalation error (ordinary recurrence already logged, unaffected): %s" % e)
+
+def record_outcome(gh_bin, rec, outcome, item_id, items, tax, no_escalate, now=None):
+    """Append the ordinary recurrence/creation row for `outcome`, log it, then,
+    for a dupe/reopened outcome only and best-effort, check red density and
+    maybe escalate. The ordinary append always happens first and always: an
+    escalation failure can never suppress or follow the recurrence record."""
+    if outcome == "dupe":
+        rec["dedupe_hit"] = True
+        append_jsonl(JSONL, rec)
+        log("SEEN AGAIN — open board item exists for failkey %s; [%s] %s recurrence logged to JSONL"
+            % (rec["key"], rec["project"], rec["title"]))
+    elif outcome == "reopened":
+        rec["board_item"] = item_id
+        rec["reopened"] = True
+        append_jsonl(JSONL, rec)
+        log("REOPENED board item %s (was Done) for failkey %s; [%s] %s"
+            % (item_id, rec["key"], rec["project"], rec["title"]))
+    elif outcome == "created":
+        rec["board_item"] = item_id
+        append_jsonl(JSONL, rec)
+        log("FILED [%s] %s: %s -> board item %s (failkey %s)"
+            % (rec["project"], rec.get("label") or "FAILURE", rec["title"], item_id, rec["key"]))
+    else:
+        rec["pending_board"] = True
+        append_jsonl(JSONL, rec)
+        append_jsonl(PENDING, rec)
+        log("board create FAILED — logged [%s] %s and queued (pending-board)" % (rec["project"], rec["title"]))
+
+    if outcome in ("dupe", "reopened"):
+        try:
+            maybe_escalate(gh_bin, rec, outcome, items, tax, no_escalate, now=now)
+        except Exception as e:
+            log("stuck escalation error (ordinary recurrence already logged, unaffected): %s" % e)
+
+def stuck_report(now=None):
+    """--stuck-report: log-only, no gh, no board, no writes. Every key that
+    would escalate on a live call right now: density >= FAILTASK_STUCK_DAYS
+    within FAILTASK_STUCK_WINDOW_DAYS, AND a row in the last 48h (a key that
+    stopped firing wouldn't reach a live dupe/reopened outcome at all, so it
+    wouldn't actually escalate even though its historical density qualifies)."""
+    threshold = stuck_days_threshold()
+    window = stuck_window_days()
+    if threshold <= 0:
+        print("failtask --stuck-report: escalation disabled (FAILTASK_STUCK_DAYS=0)")
+        return
+    now = now or now_local()
+    candidates = all_stuck_candidates(JSONL, window, now)
+    rows = []
+    for key, st in candidates.items():
+        if len(st["days"]) < threshold:
+            continue
+        if (now - st["last_dt"]) > timedelta(hours=48):
+            continue
+        rows.append((key, st))
+    rows.sort(key=lambda kv: (-len(kv[1]["days"]), kv[0]))
+    for key, st in rows:
+        print("days=%d/%d rows=%d first=%s project=%s key=%s title=%s"
+              % (len(st["days"]), window, st["rows_in_window"], st["first_seen"].isoformat(),
+                 st["project"], key, st["title"]))
+    print("%d key(s) would escalate now (density >= %d of last %d days, active in last 48h)"
+          % (len(rows), threshold, window))
+
 # ----------------------------------------------------------------------- main
 
 def main():
     os.makedirs(FAILDIR, exist_ok=True)
     project  = os.environ["FT_PROJECT"]
     title    = os.environ["FT_TITLE"]
-    drain_only = (project == "__drain__")
+    if project == "__stuck_report__":
+        stuck_report()
+        return
+    drain_only  = (project == "__drain__")
+    no_escalate = os.environ.get("FT_NO_ESCALATE") == "1"
     detail   = os.environ.get("FT_DETAIL", "")
     severity = os.environ.get("FT_SEVERITY") or "error"
     key      = os.environ.get("FT_KEY", "")
@@ -535,7 +804,10 @@ def main():
             % (project, title, JSONL))
         return
 
-    # Drain any previously queued records first.
+    # Drain any previously queued records first. Deliberately NOT evaluated for
+    # escalation: these are old records replayed on someone else's live call,
+    # and the caller whose failure prompted this run already gets its own
+    # escalation check below, so draining a backlog would file it again.
     if os.path.exists(PENDING):
         queued, leftovers = [], []
         try:
@@ -565,28 +837,8 @@ def main():
         return
 
     outcome, item_id = board_create(gh_bin, rec, items, tax)
+    record_outcome(gh_bin, rec, outcome, item_id, items, tax, no_escalate)
     cache_sync(items)
-    if outcome == "dupe":
-        rec["dedupe_hit"] = True   # the JSONL is the recurrence record
-        append_jsonl(JSONL, rec)
-        log("SEEN AGAIN — open board item exists for failkey %s; [%s] %s recurrence logged to JSONL"
-            % (key, project, title))
-    elif outcome == "reopened":
-        rec["board_item"] = item_id
-        rec["reopened"] = True
-        append_jsonl(JSONL, rec)
-        log("REOPENED board item %s (was Done) for failkey %s; [%s] %s"
-            % (item_id, key, project, title))
-    elif outcome == "created":
-        rec["board_item"] = item_id
-        append_jsonl(JSONL, rec)
-        log("FILED [%s] %s: %s -> board item %s (failkey %s)"
-            % (project, os.environ.get("FT_LABEL") or "FAILURE", title, item_id, key))
-    else:
-        rec["pending_board"] = True
-        append_jsonl(JSONL, rec)
-        append_jsonl(PENDING, rec)
-        log("board create FAILED — logged [%s] %s and queued (pending-board)" % (project, title))
 
 try:
     main()
