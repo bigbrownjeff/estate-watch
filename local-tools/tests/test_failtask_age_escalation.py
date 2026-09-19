@@ -393,5 +393,60 @@ class MalformedRowsInProcessTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _card(item_id, failkey, status="Todo"):
+    return {"id": item_id, "status": status,
+            "content": {"type": "Issue", "title": "[proj] card",
+                        "body": "project-raw: proj\nfailkey: %s" % failkey,
+                        "url": "https://github.com/bigbrownjeff/board/issues/1", "number": 1}}
+
+
+def run_real_call(cards, extra_args=()):
+    """The real script, through bash on /usr/bin/python3, for a key that is red
+    on 6 of 14 days and already has an open ordinary card. FAILTASK_DRY_RUN=1
+    prints board writes instead of making them, and the seeded board cache
+    answers the dedupe lookup, so no gh subprocess runs. -> (stderr, log keys)."""
+    tmp = tempfile.mkdtemp(prefix="failtask-age-call-")
+    try:
+        faildir = os.path.join(tmp, ".claude", "failures")
+        os.makedirs(faildir, exist_ok=True)
+        log_path = os.path.join(faildir, "failures.jsonl")
+        with open(log_path, "w") as f:
+            for d in range(1, 7):
+                f.write(make_row("k1", d) + "\n")
+        with open(os.path.join(faildir, "board-cache.json"), "w") as f:
+            json.dump({"v": 2, "items": cards}, f)
+        env = dict(os.environ)
+        env.update({"HOME": tmp, "FAILTASK_DRY_RUN": "1"})
+        env.pop("FAILTASK_STUCK_DAYS", None)
+        env.pop("FAILTASK_STUCK_WINDOW_DAYS", None)
+        r = subprocess.run(["bash", FAILTASK_PATH, "proj", "Title", "--dedupe-key", "k1"]
+                           + list(extra_args), capture_output=True, text=True, timeout=60, env=env)
+        assert r.returncode == 0, r.stderr
+        with open(log_path) as f:
+            keys = [json.loads(line)["key"] for line in f if line.strip()]
+        return r.stderr, keys[6:]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+class RealCallEscalationTests(unittest.TestCase):
+    def test_a_standing_key_files_one_STANDING_card_through_bash(self):
+        stderr, new_keys = run_real_call([_card("PVTI_k1", "k1")])
+        self.assertIn("STANDING: Title", stderr)
+        self.assertIn("failkey: stuck:k1", stderr)
+        self.assertEqual(new_keys, ["k1", "stuck:k1"])
+
+    def test_no_escalate_reaches_python_and_suppresses_the_card(self):
+        stderr, new_keys = run_real_call([_card("PVTI_k1", "k1")], ["--no-escalate"])
+        self.assertNotIn("STANDING", stderr)
+        self.assertEqual(new_keys, ["k1"])
+
+    def test_an_open_STANDING_card_means_no_board_write_and_no_second_log_row(self):
+        stderr, new_keys = run_real_call([_card("PVTI_k1", "k1"),
+                                          _card("PVTI_stuck", "stuck:k1")])
+        self.assertNotIn("DRY-RUN would run", stderr)
+        self.assertEqual(new_keys, ["k1"])
+
+
 if __name__ == "__main__":
     unittest.main()

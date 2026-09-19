@@ -706,8 +706,11 @@ def maybe_escalate(gh_bin, rec, outcome, items, tax, no_escalate, now=None):
         }
         outcome2, item_id = board_create(gh_bin, stuck_rec, items, tax)
         if outcome2 == "dupe":
-            stuck_rec["dedupe_hit"] = True
-        elif outcome2 == "reopened":
+            # The STANDING card is already open and the ordinary row is the
+            # recurrence record. A stuck: row per recurrence would double the
+            # log for every standing key, so only a state change is logged.
+            return
+        if outcome2 == "reopened":
             stuck_rec["board_item"] = item_id
             stuck_rec["reopened"] = True
         elif outcome2 == "created":
