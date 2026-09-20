@@ -296,6 +296,21 @@ def negation_conflict(existing_lines, inserted_lines):
     return None
 
 
+def drop_modified_line(text):
+    """`text` with its frontmatter `modified:` line removed, if any (CARD-880:
+    modified is reported as evidence for a human and never used to pick a
+    winner -- but left in, a bare timestamp bump turns a pure append into a
+    replace-hunk against the diff, so a provably lossless promotion reads as
+    an unresolvable conflict). Only the metadata block between the leading
+    `---` markers is touched; a body line that happens to start with
+    `modified:` is untouched."""
+    m = re.match(r"^---\n(.*?\n)---\n", text, re.S)
+    if not m:
+        return text
+    head = re.sub(r"^[ \t]*modified\s*:[^\n]*\n", "", m.group(1), flags=re.M)
+    return "---\n" + head + "---\n" + text[m.end():]
+
+
 def superset(a, b):
     """True only if a can replace b with provably no loss: every line of b
     survives in a in the SAME ORDER (difflib opcodes against b are equal/
@@ -359,10 +374,14 @@ def decide(name, per_profile):
         return "add", src, "absent in %s" % ", ".join(sorted(missing))
 
     # Content differs. Find a single winner that is a superset of every other.
+    # CARD-880: compare with the modified: stamp stripped from both sides so
+    # a timestamp bump alone can't turn a pure append into a false conflict;
+    # the winner's untouched text (stamp included) is still what gets written.
     winners = []
     for p, v in elig.items():
+        v_cmp = drop_modified_line(v["text"])
         others = [w["text"] for q, w in elig.items() if q != p]
-        if all(v["text"] == o or superset(v["text"], o) for o in others):
+        if all(v["text"] == o or superset(v_cmp, drop_modified_line(o)) for o in others):
             winners.append(p)
     winners = [p for p in winners
                if any(elig[p]["text"] != elig[q]["text"] for q in elig if q != p)]
