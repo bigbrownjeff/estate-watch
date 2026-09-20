@@ -435,6 +435,96 @@
       "url": "https://smartams.pages.dev/",
       "expect": "retired",
       "allowed_status": [404, 410]
+    },
+    {
+      "id": "gated-twin-links-custom",
+      "note": "Card #879 (creak ledger 12, cashflow 29h open 2026-09-01): probe BOTH hosts of every Access-gated Pages property so a wrong-cwd deploy that drops Functions middleware on the pages.dev twin cannot serve real content while the custom domain still looks gated. Custom-domain half of the launchpad pair; twin is gated-twin-links-pages. Verified 2026-09-19: 302 to cloudflareaccess.com even with a forged Cf-Access-Jwt-Assertion header.",
+      "type": "url",
+      "url": "https://links.jeffpinto.com/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-twin-links-pages",
+      "note": "Card #879: pages.dev twin of gated-twin-links-custom (project jeffpinto-links, per 'npx wrangler pages project list' 2026-09-19). The registry's own launchpad note ('pages.dev 302s here') was last verified 2026-07-26, over 7 weeks before this check existed -- exactly the kind of stale claim this card exists to keep honest.",
+      "type": "url",
+      "url": "https://jeffpinto-links.pages.dev/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-twin-cashflow-custom",
+      "note": "Card #879: custom-domain half of the cashflow pair (the property that started this card -- real dollar figures served open on the pages.dev twin for ~29h on 2026-09-01). Twin is gated-twin-cashflow-pages.",
+      "type": "url",
+      "url": "https://cashflow.jeffpinto.com/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-twin-cashflow-pages",
+      "note": "Card #879: pages.dev twin of gated-twin-cashflow-custom (project jeffpinto-cashflow). Verified 2026-09-19: 302 to https://cashflow.jeffpinto.com/ with an empty body (the Functions middleware forwarding correctly, not serving content) -- allowed_redirect_hosts matches on any hop in the chain, so this passes once the forward lands on the Access-gated custom domain.",
+      "type": "url",
+      "url": "https://jeffpinto-cashflow.pages.dev/",
+      "expect": "gated",
+      "allowed_status": [200, 301, 302, 401, 403],
+      "allowed_redirect_hosts": ["cashflow.jeffpinto.com", "cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-twin-personas-custom",
+      "note": "Card #879: custom-domain half of the persona-chat pair (board-advisor / marketing-lead / groundskeeper chats). Twin is gated-twin-personas-pages. Verified 2026-09-19: 302 to cloudflareaccess.com even with a forged Cf-Access-Jwt-Assertion header.",
+      "type": "url",
+      "url": "https://personas.jeffpinto.com/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-twin-personas-pages",
+      "note": "Card #879: pages.dev twin of gated-twin-personas-custom (project persona-chat, per 'npx wrangler pages project list' 2026-09-19: persona-chat-3g3.pages.dev). Not previously probed on this host -- registry only ever verifies the custom domain for this project.",
+      "type": "url",
+      "url": "https://persona-chat-3g3.pages.dev/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-single-drafts-preview-pages",
+      "note": "Card #879: jeffpinto-drafts-preview has no custom domain (wrangler project list, 2026-09-19) so there is no twin. Registry text (updated pre-2026-07-23) says HTTP Basic Auth, but a live probe on 2026-09-19 shows it is now actually behind Cloudflare Access (302 to cold-waterfall-c527.cloudflareaccess.com, cf-access-* header present) -- the registry note is stale and should be corrected separately; this check asserts the gate that is actually there.",
+      "type": "url",
+      "url": "https://jeffpinto-drafts-preview.pages.dev/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-single-sous-chef-pages",
+      "note": "Card #879: sous-chef-2yc has no custom domain (wrangler project list, 2026-09-19). Cloudflare Access (email OTP) per registry.",
+      "type": "url",
+      "url": "https://sous-chef-2yc.pages.dev/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-single-pinto-triptych-pages",
+      "note": "Card #879: pinto-triptych has no custom domain (wrangler project list, 2026-09-19). Cloudflare Access, only-Jeff, per registry (2026-07-27 remediation already forged-header-verified once; this makes the check standing).",
+      "type": "url",
+      "url": "https://pinto-triptych.pages.dev/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
+    },
+    {
+      "id": "gated-single-clearshift-locum-pages",
+      "note": "Card #879: clearshift-locum-9f3a72 has no custom domain (wrangler project list, 2026-09-19). Cloudflare Access, only-Jeff, per registry.",
+      "type": "url",
+      "url": "https://clearshift-locum-9f3a72.pages.dev/",
+      "expect": "gated",
+      "allowed_status": [200, 401, 403],
+      "allowed_redirect_hosts": ["cold-waterfall-c527.cloudflareaccess.com"]
     }
   ]
 }
