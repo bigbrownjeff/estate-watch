@@ -121,17 +121,39 @@ class HealSweepStuckTests(unittest.TestCase):
         self.assertIsNotNone(evidence, "mutation was not caught: still refused to heal")
 
     # -------------------------------------------------------------- test 2
-    def test_density_4_of_14_with_row_yesterday_de_escalates_not_heals(self):
-        # Cold-review finding: a key with a row yesterday is still active,
-        # so closing this card must say "de-escalated", never "healed".
-        rows = [row("k2", d) for d in (1, 4, 8, 13)]  # 4 distinct days, most recent yesterday
+    def test_density_3_of_14_with_row_yesterday_de_escalates_not_heals(self):
+        # A key with a row yesterday is still active, so closing this card
+        # must say "de-escalated", never "healed".
+        rows = [row("k2", d) for d in (1, 8, 13)]  # 3 distinct days, most recent yesterday
         rows += [row("other", d) for d in range(14, 30)]  # pads the log span only
         write_jsonl(self.mod.FAILURES_LOG, rows)
         evidence, reason = self.mod.check_stuck(stuck_card("k2", 20), now=NOW)
         self.assertIsNotNone(evidence, reason)
-        self.assertIn("4 red day", evidence)
+        self.assertIn("3 red day", evidence)
         self.assertIn("de-escalated", evidence)
         self.assertNotIn("healed:", evidence)
+
+    def test_density_one_under_the_threshold_stays_open_so_a_hovering_key_does_not_flap(self):
+        # 4 of 14 is what a failure firing every few days looks like on its
+        # quieter weeks; failtask would reopen the card at 5, so it stays open.
+        rows = [row("k2", d) for d in (1, 4, 8, 13)]
+        rows += [row("other", d) for d in range(14, 30)]
+        write_jsonl(self.mod.FAILURES_LOG, rows)
+        evidence, reason = self.mod.check_stuck(stuck_card("k2", 20), now=NOW)
+        self.assertIsNone(evidence, str((evidence, reason)))
+        self.assertIn("still red", reason)
+
+    def test_margin_zero_closes_as_soon_as_density_is_under_the_threshold(self):
+        rows = [row("k2", d) for d in (1, 4, 8, 13)]
+        rows += [row("other", d) for d in range(14, 30)]
+        write_jsonl(self.mod.FAILURES_LOG, rows)
+        os.environ["HEAL_STUCK_DENSITY_MARGIN"] = "0"
+        try:
+            evidence, reason = self.mod.check_stuck(stuck_card("k2", 20), now=NOW)
+        finally:
+            os.environ.pop("HEAL_STUCK_DENSITY_MARGIN", None)
+        self.assertIsNotNone(evidence, reason)
+        self.assertIn("4 red day", evidence)
 
     def test_density_5_of_14_does_not_heal(self):
         rows = [row("k2", d) for d in (1, 4, 6, 8, 13)]  # 5 distinct days
@@ -142,15 +164,15 @@ class HealSweepStuckTests(unittest.TestCase):
 
     def test_mutation_density_threshold_off_by_one(self):
         """Proof: an off-by-one (< -> <=) on the density comparison wrongly
-        heals the 5-of-14 case."""
-        rows = [row("k2", d) for d in (1, 4, 6, 8, 13)]
+        closes the 4-of-14 case the margin exists to keep open."""
+        rows = [row("k2", d) for d in (1, 4, 8, 13)]
         rows += [row("other", d) for d in range(14, 30)]
         write_jsonl(self.mod.FAILURES_LOG, rows)
         import inspect
         src = inspect.getsource(self.mod.check_stuck)
         mutated = src.replace(
-            "density_ok = len(density_days) < threshold",
-            "density_ok = len(density_days) <= threshold", 1)
+            "density_ok = len(density_days) < threshold - heal_stuck_density_margin()",
+            "density_ok = len(density_days) <= threshold - heal_stuck_density_margin()", 1)
         self.assertNotEqual(src, mutated, "mutation target string not found")
         ns = dict(self.mod.__dict__)
         exec(compile(mutated, "<mutated check_stuck>", "exec"), ns)
@@ -344,6 +366,26 @@ class HealSweepStuckTests(unittest.TestCase):
         evidence, reason = self.mod.check_stuck(stuck_card("k13", 20), now=NOW)
         self.assertIsNone(evidence, str((evidence, reason)))
         self.assertIn("future-dated", reason)
+
+
+class CloseStampVerbTests(unittest.TestCase):
+    def _stamp_for(self, evidence):
+        mod = load_heal_sweep()
+        mod.DRYRUN = True
+        lines = []
+        mod.log = lines.append
+        card = {"repository": "o/r", "number": 1, "ref": "1", "item_id": "PVTI_x"}
+        self.assertTrue(mod.close_card("/usr/bin/true", card, evidence))
+        return lines[-1]
+
+    def test_a_de_escalation_is_not_stamped_healed(self):
+        line = self._stamp_for("stuck:k de-escalated: no longer standing; last row at X")
+        self.assertIn("closed by heal-sweep: ", line)
+        self.assertNotIn("healed: ", line)
+
+    def test_a_real_heal_keeps_the_healed_stamp(self):
+        line = self._stamp_for("stuck:k healed: last row at X")
+        self.assertIn(": healed: ", line)
 
 
 class HealSweepDryRunPulseLogTests(unittest.TestCase):

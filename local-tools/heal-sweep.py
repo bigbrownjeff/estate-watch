@@ -522,6 +522,14 @@ def stuck_density_window_days():
     return _env_int("FAILTASK_STUCK_WINDOW_DAYS", 14)
 
 
+def heal_stuck_density_margin():
+    # How far UNDER the escalation threshold the density must fall before a
+    # STANDING card de-escalates. A failure that fires every few days hovers at
+    # the threshold; with no margin its card would close and reopen on
+    # alternate days. 0 restores "close as soon as it is under the threshold".
+    return max(0, _env_int("HEAL_STUCK_DENSITY_MARGIN", 1))
+
+
 def _now_local():
     return datetime.now(timezone.utc).astimezone()
 
@@ -664,7 +672,7 @@ def check_stuck(card, now=None):
             continue
         if last_dt is None or dt > last_dt:
             last_dt = dt
-        d = dt.date()
+        d = dt.astimezone().date()  # local days, the same bucketing failtask uses
         if density_start <= d <= today:
             density_days.add(d)
         if quiet_start is not None and quiet_start <= d <= today:
@@ -687,7 +695,7 @@ def check_stuck(card, now=None):
                        % (original_key, last_dt.isoformat(), FAILURES_LOG))
 
     quiet_ok = (not quiet_disabled) and (not quiet_violated)
-    density_ok = len(density_days) < threshold
+    density_ok = len(density_days) < threshold - heal_stuck_density_margin()
     if not (quiet_ok or density_ok):
         return None, ("no heal — %s still red: last row %s, %d red day(s) of the last %d "
                        "as of %s (threshold %d)"
@@ -704,7 +712,7 @@ def check_stuck(card, now=None):
     # quiet window, or the quiet path is disabled) but has fallen under the
     # density threshold. De-escalate the STANDING card rather than claim
     # the failure "healed" while it is still recent.
-    return ("stuck:%s de-escalated: no longer standing (still active, last row at %s), "
+    return ("stuck:%s de-escalated: no longer standing; last row at %s, "
              "%d red day(s) of the last %d as of %s (threshold %d), from %s"
              % (original_key, last_dt.isoformat(), len(density_days), window_days,
                 today.isoformat(), threshold, FAILURES_LOG)), None
@@ -775,7 +783,8 @@ def stamp_done(gh_bin, card, repo, number):
 
 
 def close_card(gh_bin, card, evidence):
-    stamp = "healed: %s %s" % (now_iso(), evidence)
+    verb = "closed by heal-sweep" if " de-escalated:" in evidence else "healed"
+    stamp = "%s: %s %s" % (verb, now_iso(), evidence)
     repo = card["repository"] or BOARD_REPO
     number = card["number"]
     if DRYRUN:
@@ -842,6 +851,11 @@ def main():
               "machine-checkable heal (%s)"
               % (n_closed, len(closed), skip_count,
                  ", ".join("%s=%d" % (k, len(v)) for k, v in sorted(skipped.items(), key=lambda x: -len(x[1]))[:8])))
+    if _failures_log_cache and _failures_log_cache.get("skipped"):
+        # One bad line disables the whole stuck class (the safe direction), so
+        # it is said here, not only in a per-card reason the top-8 list can hide.
+        report += ("; %s has %d unparseable line(s), so no STANDING card was judged this run"
+                   % (FAILURES_LOG, _failures_log_cache["skipped"]))
     # Always loud, even under --quiet: this is the one line that proves a heal
     # ran and what it did, per memory fixes-that-quiet-alerts-leave-a-trace.
     # Carries the same [dry-run] marker log() uses, so a rehearsal run never
