@@ -628,7 +628,7 @@ def key_stuck_stats(jsonl_path, key, window_days, now=None):
         dt = _row_dt(row)
         if dt is None:
             continue
-        d = dt.date()
+        d = dt.astimezone().date()  # local days, whatever offset the row was stamped with
         if first_seen is None or d < first_seen:
             first_seen = d
         if start <= d <= today:
@@ -650,7 +650,7 @@ def all_stuck_candidates(jsonl_path, window_days, now=None):
         dt = _row_dt(row)
         if dt is None:
             continue
-        d = dt.date()
+        d = dt.astimezone().date()  # local days, whatever offset the row was stamped with
         key = row["key"]
         st = out.get(key)
         if st is None:
