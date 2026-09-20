@@ -29,6 +29,8 @@ rows=(
   "local-tools/tests/test_turn_cap_gate.py|$HOME/.claude/bin/tests/test_turn_cap_gate.py|0755"
   "local-tools/tests/test_burn_meter_dedupe.py|$HOME/.claude/bin/tests/test_burn_meter_dedupe.py|0755"
   "local-tools/heal-sweep.py|$HOME/.claude/bin/heal-sweep.py|0755"
+  "local-tools/fleet-sentinel.sh|$HOME/.claude/bin/fleet-sentinel.sh|0755"
+  "local-tools/estate-pulse.py|$HOME/.claude/bin/estate-pulse.py|0755"
   "local-tools/tests/test_heal_sweep_burn.py|$HOME/.claude/bin/tests/test_heal_sweep_burn.py|0755"
   "local-tools/phoenix-enrich.py|$HOME/.claude/bin/phoenix-enrich.py|0755"
   "local-tools/morning-digest.py|$HOME/.claude/bin/morning-digest.py|0755"
