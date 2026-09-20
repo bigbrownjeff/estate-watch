@@ -174,7 +174,14 @@ except Exception: pass")
 for d in "$HOME_DIR"/Projects/*/; do
   [ -d "$d/.git" ] || continue
   repo=$(basename "$d")
-  # unpushed commits on any branch (covers no-upstream branches too)
+  # Commits on ANY local branch that no remote ref contains. --not --remotes is
+  # what makes this correct for a squash-merged branch: such a branch has no
+  # upstream and diverges from the default branch, but its commits are reachable
+  # from some remote ref, so it must not read as unpushed work (board #987/#242:
+  # an ancestor-of-default-branch check called every squash-merged branch
+  # permanently unpushed and buried real work under the noise). Counted in ONE
+  # git call across all branches, never summed per branch: a commit reachable
+  # from two local branches would otherwise be counted twice.
   unpushed=$(git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr -d ' ')
   if printf '%s\n' "$REPO_LOCAL_ONLY" | grep -qx "$repo"; then
     unpushed=0
