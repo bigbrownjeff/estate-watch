@@ -32,6 +32,17 @@ Heal classes:
         or a final text block that is not a session-limit death). A
         rollup card is healed only when every >40-tool_use subagent
         transcript in its 24h window (+2h pad) satisfies the same test.
+  5. stuck:<original key>  (failtask's STANDING escalation cards)
+     -> from ~/.claude/failures/failures.jsonl alone: the original key has
+        no row in the last HEAL_STUCK_QUIET_DAYS days (default 7), OR its
+        red density (distinct local days with a row in the last
+        FAILTASK_STUCK_WINDOW_DAYS days, default 14) has fallen under
+        FAILTASK_STUCK_DAYS (default 5) — same two env knobs failtask
+        itself reads. Only healed when the log's oldest row is old enough
+        to trust the window being judged, and only when the card was
+        filed before the quiet period started (a log that cannot vouch
+        for the whole window, or a card/log timeline that contradicts
+        itself, means "no heal", never a guess).
 
 Everything else is left open and counted as "no machine-checkable heal" by
 failkey-class prefix, never guessed at.
@@ -56,12 +67,13 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HOME = os.path.expanduser("~")
 GH_BOARD_EXPORTS = os.path.join(HOME, "data-vaults", "gh-board")
 FAILDIR = os.path.join(HOME, ".claude", "failures")
 PULSE_LOG = os.path.join(FAILDIR, "pulse.log")
+FAILURES_LOG = os.path.join(FAILDIR, "failures.jsonl")
 MEMORY_SYNC = os.path.join(HOME, ".claude", "bin", "memory-sync")
 
 PROJECT_ID = "PVT_kwHOARM7z84Bd1kf"
@@ -75,6 +87,7 @@ QUIET = "--quiet" in sys.argv[1:]
 
 FAILKEY_RE = re.compile(r"failkey:\s*(\S+)")
 FILED_RE = re.compile(r"filed:\s*(\S+)")
+STUCK_RE = re.compile(r"^stuck:(.+)$")
 LAUNCHD_RE = re.compile(r"^(?:pulse:)?launchd:(.+)$")
 BURN_AGENT_RE = re.compile(r"^burn:agent:(.+)$")
 BURN_ROLLUP_RE = re.compile(r"^burn:agent-rollup:(\d{4}-\d{2}-\d{2})$")
@@ -465,9 +478,185 @@ def classify_burn_rollup(card):
             % (date_str, len(candidates))), None
 
 
+# --------------------------------------------------------------- stuck class
+# failtask escalates a recurring key to a STANDING card, failkey
+# "stuck:<original key>", once the original is red on FAILTASK_STUCK_DAYS+
+# distinct days of the last FAILTASK_STUCK_WINDOW_DAYS (memory
+# standing-failures-need-age-escalation). This class closes that card once
+# failures.jsonl shows the original key has really stopped — never a guess,
+# and never off a log that cannot vouch for the window being judged (the
+# mirror image of the "never truncate failures.jsonl" guard in
+# log-rotate.py: a truncated or missing log would make every standing
+# failure look like it stopped).
+_failures_log_cache = None
+
+
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log("%s=%r is not an integer; using default %d" % (name, raw, default))
+        return default
+
+
+def heal_stuck_quiet_days():
+    return _env_int("HEAL_STUCK_QUIET_DAYS", 7)
+
+
+def stuck_density_threshold():
+    # Same knob failtask reads to decide what "standing" means, so the two
+    # tools can't disagree about the threshold.
+    return _env_int("FAILTASK_STUCK_DAYS", 5)
+
+
+def stuck_density_window_days():
+    return _env_int("FAILTASK_STUCK_WINDOW_DAYS", 14)
+
+
+def _now_local():
+    return datetime.now(timezone.utc).astimezone()
+
+
+def _parse_failure_row_ts(ts):
+    """Aware datetime, or None for a missing/unparsable ts (never raises).
+    A naive fromisoformat() result is presumed local, same as failtask's
+    _row_dt, so it can be compared/subtracted against any other aware dt."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt
+
+
+def _load_failures_log():
+    """Reads FAILURES_LOG once per sweep and caches it, the way
+    `_launchctl_cache` caches `launchctl list`. Returns
+    {"rows": [(row, dt), ...], "oldest_dt": dt or None, "readable": bool,
+    "reason": str or None}. A missing file, an empty file, or a file with
+    no parseable-ts rows are all "not readable", each with a reason naming
+    the log — never fatal, and never treated as evidence of quiet."""
+    global _failures_log_cache
+    if _failures_log_cache is not None:
+        return _failures_log_cache
+    result = {"rows": [], "oldest_dt": None, "readable": False, "reason": None}
+    if not os.path.isfile(FAILURES_LOG):
+        result["reason"] = "%s not found" % FAILURES_LOG
+        _failures_log_cache = result
+        return result
+    rows, oldest = [], None
+    try:
+        with open(FAILURES_LOG, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue  # an unreadable line is skipped, not fatal
+                if not isinstance(row, dict):
+                    continue
+                dt = _parse_failure_row_ts(row.get("ts"))
+                if dt is None:
+                    continue
+                rows.append((row, dt))
+                if oldest is None or dt < oldest:
+                    oldest = dt
+    except Exception as e:
+        result["reason"] = "%s unreadable (%r)" % (FAILURES_LOG, e)
+        _failures_log_cache = result
+        return result
+    if not rows:
+        result["reason"] = "%s has no parseable rows" % FAILURES_LOG
+        _failures_log_cache = result
+        return result
+    result.update(rows=rows, oldest_dt=oldest, readable=True)
+    _failures_log_cache = result
+    return result
+
+
+def check_stuck(card, now=None):
+    original_key = STUCK_RE.match(card["failkey"]).group(1)
+    filed_ts = card["filed_ts"]
+    if filed_ts is None:
+        return None, "stuck:%s — card has no parseable filed timestamp" % original_key
+
+    flog = _load_failures_log()
+    if not flog["readable"]:
+        return None, "no heal — %s" % flog["reason"]
+
+    quiet_days = heal_stuck_quiet_days()
+    threshold = stuck_density_threshold()
+    window_days = stuck_density_window_days()
+
+    now = now or _now_local()
+    today = now.date()
+
+    # The log must be able to vouch for the longer of the two windows being
+    # judged, or "quiet"/"low density" could just mean "the log doesn't go
+    # back that far" — indistinguishable from a genuine heal without this.
+    span_days = max(quiet_days, window_days)
+    span_start = today - timedelta(days=span_days - 1)
+    if flog["oldest_dt"].date() > span_start:
+        return None, ("no heal — %s oldest row is %s, too short to judge the %d-day "
+                       "window (needs rows back to %s)"
+                       % (FAILURES_LOG, flog["oldest_dt"].date().isoformat(), span_days,
+                          span_start.isoformat()))
+
+    quiet_start = today - timedelta(days=quiet_days - 1)
+    filed_dt = datetime.fromtimestamp(filed_ts, tz=timezone.utc).astimezone()
+    if filed_dt.date() >= quiet_start:
+        # A card filed inside (or after) the quiet window it is supposedly
+        # proving is a contradiction (e.g. filed yesterday for a key that
+        # last fired over a week ago) — leave it open rather than trust it.
+        return None, ("no heal — card filed %s is not before the %d-day quiet window "
+                       "starting %s; filed/last-fire timestamps are inconsistent, leaving open"
+                       % (filed_dt.date().isoformat(), quiet_days, quiet_start.isoformat()))
+
+    density_start = today - timedelta(days=window_days - 1)
+    last_dt = None
+    density_days = set()
+    quiet_violated = False
+    for row, dt in flog["rows"]:
+        key = row.get("key") or ""
+        if key.startswith("stuck:"):
+            continue  # bookkeeping for some escalation, never the original firing
+        if key != original_key:
+            continue
+        if last_dt is None or dt > last_dt:
+            last_dt = dt
+        d = dt.date()
+        if density_start <= d <= today:
+            density_days.add(d)
+        if quiet_start <= d <= today:
+            quiet_violated = True
+
+    quiet_ok = not quiet_violated
+    density_ok = len(density_days) < threshold
+    if not (quiet_ok or density_ok):
+        return None, ("no heal — %s still red: last row %s, %d red day(s) of the last %d "
+                       "as of %s (threshold %d)"
+                       % (original_key, last_dt.isoformat() if last_dt else "never",
+                          len(density_days), window_days, today.isoformat(), threshold))
+
+    return ("stuck:%s healed: last row at %s, %d red day(s) of the last %d as of %s "
+             "(threshold %d), from %s"
+             % (original_key, last_dt.isoformat() if last_dt else "none on record",
+                len(density_days), window_days, today.isoformat(), threshold, FAILURES_LOG)), None
+
+
 # --------------------------------------------------------------------- classify
 def classify(card):
     fk = card["failkey"]
+    if STUCK_RE.match(fk):
+        return check_stuck(card)
     m = LAUNCHD_RE.match(fk)
     if m:
         return check_launchd(m.group(1), card["filed_ts"])
@@ -483,6 +672,8 @@ def classify(card):
 
 
 def class_of(failkey):
+    if STUCK_RE.match(failkey):
+        return "stuck"
     if LAUNCHD_RE.match(failkey):
         return "launchd"
     if failkey in BACKUP_LANES:

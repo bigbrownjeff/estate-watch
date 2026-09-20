@@ -38,6 +38,7 @@ rows=(
   "local-tools/tests/test_prompt_maestro_weekly.sh|$HOME/.claude/bin/tests/test_prompt_maestro_weekly.sh|0755"
   "local-tools/log-rotate.py|$HOME/.claude/bin/log-rotate.py|0755"
   "local-tools/tests/test_log_rotate.py|$HOME/.claude/bin/tests/test_log_rotate.py|0755"
+  "local-tools/tests/test_heal_sweep_stuck.py|$HOME/.claude/bin/tests/test_heal_sweep_stuck.py|0755"
 )
 
 case "$mode" in
