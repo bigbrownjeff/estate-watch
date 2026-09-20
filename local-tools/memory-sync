@@ -142,6 +142,16 @@ SYNC_TYPES = {"feedback", "user"}
 # A file touched within this many seconds may be mid-write by a live session.
 FRESH_SECONDS = 120
 SNAPSHOT_KEEP = 30
+# Provenance default (2026-09-19). The harness writes memories with name,
+# description and metadata.type only, never `status:`, so --check went red on
+# every day a memory was written (23 hand-stamped 09-15, 21 more by 09-19).
+# The writing runs now stamp the default `status: active` on those files. A
+# fresh one waits up to STAMP_GRACE_SECONDS (the daily 08:45 run plus slack)
+# before --check fails on it; after that, the stamping run is not doing its job.
+STAMP_GRACE_SECONDS = 26 * 3600
+# A memory whose own frontmatter says it is superseded or retired is never
+# defaulted to active: that is the case the provenance gate exists to catch.
+RETIRE_SIGNAL = re.compile(r"\b(superseded|retired)\b", re.I)
 LOCK_STALE_SECONDS = 1800
 BYTE_BUDGET = 24000
 
@@ -664,6 +674,95 @@ def board(title, detail, key):
                    check=False, capture_output=True)
 
 
+# ----------------------------------------------------------------- provenance
+
+def provenance_scan():
+    """Every memory with no `status:` in its frontmatter, as dicts of profile,
+    name, path, text, mtime and `refuse` (why it must not be defaulted, or "").
+    Stores that resolve to one tree (the symlinked sisters) are scanned once."""
+    out, scanned = [], set()
+    for p in PROFILES:
+        d = os.path.realpath(os.path.join(PROFILES[p], REL))
+        if d in scanned or not os.path.isdir(d):
+            continue
+        scanned.add(d)
+        for fn in sorted(os.listdir(d)):
+            full = os.path.join(d, fn)
+            if not fn.endswith(".md") or fn == INDEX or not os.path.isfile(full):
+                continue
+            try:
+                with open(full, "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue
+            try:
+                text, refuse = raw.decode("utf-8"), ""
+            except UnicodeDecodeError:
+                text, refuse = raw.decode("utf-8", "replace"), "not valid UTF-8"
+            if not text.startswith("---"):
+                continue
+            end = text.find("\n---", 3)
+            fm = text[3:end] if end > 0 else text[:4000]
+            if re.search(r"^\s*status:\s*\S", fm, re.M):
+                continue
+            meta = frontmatter(text)
+            if not refuse and not meta:
+                refuse = "frontmatter not parseable"
+            elif not refuse and "superseded_by" in meta:
+                refuse = "has superseded_by:"
+            elif not refuse and RETIRE_SIGNAL.search(meta.get("description", "")):
+                refuse = "description says superseded/retired"
+            out.append({"profile": p, "name": fn, "path": full, "text": text,
+                        "mtime": os.path.getmtime(full), "refuse": refuse})
+    return out
+
+
+def stamp_status(text):
+    """`text` with one line, `status: active`, inserted into its frontmatter:
+    first under `metadata:` at that block's indent, else at top level."""
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    if not m:
+        return None
+    lines = m.group(1).split("\n")
+    for i, ln in enumerate(lines):
+        if re.match(r"^metadata:\s*$", ln):
+            nxt = re.match(r"^(\s+)\S", lines[i + 1]) if i + 1 < len(lines) else None
+            lines.insert(i + 1, (nxt.group(1) if nxt else "  ") + "status: active")
+            break
+    else:
+        lines.append("status: active")
+    return "---\n" + "\n".join(lines) + "\n---\n" + text[m.end():]
+
+
+def stamp_default_status():
+    """Writing runs only: stamp `status: active` on each memory that lacks a
+    status and carries no retirement signal. Snapshot first; every write is a
+    one-line insertion proven by superset() and guarded by atomic_write(expect=)
+    against a live session editing the same file. Returns the snapshot path,
+    or None if nothing needed stamping (so the run takes one snapshot, not two)."""
+    now = dt.datetime.now().timestamp()
+    todo = [x for x in provenance_scan()
+            if not x["refuse"] and now - x["mtime"] >= FRESH_SECONDS]
+    snap = snapshot("pre-stamp") if todo else None
+    if snap:
+        print("  snapshot: %s" % snap)
+    for x in todo:
+        new = stamp_status(x["text"])
+        if new is None or not superset(new, x["text"]):
+            print("  SKIP   stamp %s: %s (insertion not provably lossless)"
+                  % (x["profile"], x["name"]), file=sys.stderr)
+            continue
+        try:
+            atomic_write(x["path"], new, expect=x["text"])
+            # Keep the author's mtime: the stamp is not an edit, and a fresh
+            # mtime would DEFER this file's ADD/PROMOTE below as "mid-edit".
+            os.utime(x["path"], (x["mtime"], x["mtime"]))
+            print("  stamped  status: active  %s: %s" % (x["profile"], x["name"]))
+        except RuntimeError as e:
+            print("  SKIP   stamp %s (%s)" % (x["path"], e), file=sys.stderr)
+    return snap
+
+
 # --------------------------------------------------------------------- retire
 
 def retire(name, apply_it):
@@ -737,6 +836,8 @@ def main():
         return 0
 
     try:
+        # Before scan(), so ADD/PROMOTE carry the stamped text.
+        pre_snap = stamp_default_status() if writing else None
         store = scan()
         adds, promotes, conflicts, divergent = [], [], [], []
         clean = skipped = 0
@@ -855,36 +956,38 @@ def main():
               % (len(adds), len(promotes), len(conflicts), len(divergent), len(index_ops)))
 
         # Provenance (memory-sisters design, decision 5, Jeff 2026-09-07): every
-        # memory carries `status:` (active | superseded | retired) in its
-        # frontmatter. A file without it is reported and fails --check, so a
-        # retired rule can never be mistaken for a live one by a sister that
-        # only reads the file. Stores that resolve to one tree are scanned once.
-        no_status, scanned = [], set()
-        for p in PROFILES:
-            d = os.path.realpath(os.path.join(PROFILES[p], REL))
-            if d in scanned or not os.path.isdir(d):
-                continue
-            scanned.add(d)
-            for fn in sorted(os.listdir(d)):
-                if not fn.endswith(".md") or fn == INDEX:
-                    continue
-                try:
-                    with open(os.path.join(d, fn), errors="ignore") as fh:
-                        head = fh.read(4000)
-                except OSError:
-                    continue
-                if not head.startswith("---"):
-                    continue
-                fm = head[3:head.find("\n---", 3)] if head.find("\n---", 3) > 0 else head
-                if not re.search(r"^\s*status:\s*\S", fm, re.M):
-                    no_status.append("%s: %s" % (p, fn))
-        if no_status:
+        # memory carries `status:` (active | superseded | retired), so a retired
+        # rule can never be mistaken for a live one by a sister that only reads
+        # the file. Writing runs stamp the default on plain new memories
+        # (stamp_default_status). --check fails on a memory that must not be
+        # defaulted (it says it is superseded/retired, or cannot be parsed) and
+        # on one older than STAMP_GRACE_SECONDS that is still unstamped.
+        no_status, pending = [], []
+        for x in provenance_scan():
+            label = "%s: %s" % (x["profile"], x["name"])
+            if x["refuse"]:
+                no_status.append("%s (not defaulted: %s)" % (label, x["refuse"]))
+            elif now - x["mtime"] < STAMP_GRACE_SECONDS:
+                pending.append(label)
+            else:
+                no_status.append(label)
+        if no_status or pending:
             print()
+            for n in pending[:40]:
+                print("  NOTE     provenance pending: %s (next scheduled run stamps status: active)" % n)
             for n in no_status[:40]:
                 print("  PROVENANCE missing status: %s" % n)
             if len(no_status) > 40:
                 print("  PROVENANCE ... %d more" % (len(no_status) - 40))
-            print("           (add `status: active` under metadata:; --check fails until every memory carries one)")
+            if no_status:
+                print("           (set status: active | superseded | retired under metadata: by hand; "
+                      "--check fails until every one carries one)")
+                if args.scheduled:
+                    board("memory-sync: %d memory file(s) need a status by hand" % len(no_status),
+                          "memory-sync did not default these to status: active:\n  %s\n"
+                          "Set status under metadata:, then rerun ~/.claude/bin/memory-sync --check"
+                          % "\n  ".join(no_status[:40]),
+                          "memory-sync-provenance-" + sha(" ".join(no_status))[:12])
 
         if args.check:
             if conflicts:
@@ -900,7 +1003,7 @@ def main():
 
         # ---- apply
         if adds or promotes:
-            snap = snapshot()
+            snap = pre_snap or snapshot()
             print("\n  snapshot: %s" % snap)
             for name, src, per, _ in adds + [(n, w, p, d) for n, w, p, d in promotes]:
                 text = per[src]["text"]

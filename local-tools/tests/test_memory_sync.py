@@ -229,6 +229,9 @@ class TestIndex(Base):
         for p in self.PROFILE_NAMES:
             self.mem(p, "x.md", ["type: feedback"], "body\n")
             self.index(p, "# Memory index\n- [X](x.md) - hook\n")
+            # Past the stamping grace: a fresh one is only "pending" (2026-09-19).
+            old = time.time() - ms.STAMP_GRACE_SECONDS - 60
+            os.utime(os.path.join(ms.memdir(p), "x.md"), (old, old))
         code, out = run(["--check"])
         self.assertEqual(code, 1, out)
         self.assertIn("PROVENANCE missing status: main: x.md", out)
@@ -383,6 +386,61 @@ class TestIO(Base):
         # the live-equivalent path.
         shutil.copy(restored, p)
         self.assertEqual(ms.read(p), restored_text)
+
+
+class TestProvenance(Base):
+    FM = ["name: new-rule", "description: a plain new rule", "metadata:",
+          "  node_type: memory", "  type: feedback"]
+
+    def setup_everywhere(self, fm, age=None):
+        for prof in self.PROFILE_NAMES:
+            self.mem(prof, "new-rule.md", fm, "Body line.\n")
+            self.index(prof, "# Memory index\n- [New](new-rule.md) - rule\n")
+            if age is not None:
+                p = os.path.join(ms.memdir(prof), "new-rule.md")
+                os.utime(p, (time.time() - age, time.time() - age))
+
+    def test_scheduled_run_stamps_default_status_and_check_goes_green(self):
+        old = ms.STAMP_GRACE_SECONDS + 3600
+        self.setup_everywhere(self.FM, age=old)
+        before = ms.read(os.path.join(ms.memdir("main"), "new-rule.md"))
+        code, out = run(["--check"])
+        self.assertEqual(code, 1)
+        self.assertIn("PROVENANCE missing status: main: new-rule.md", out)
+        code, out = run(["--scheduled"])
+        self.assertEqual(code, 0)
+        self.assertIn("stamped  status: active  main: new-rule.md", out)
+        for prof in self.PROFILE_NAMES:
+            after = ms.read(os.path.join(ms.memdir(prof), "new-rule.md"))
+            self.assertEqual(after, before.replace("metadata:\n", "metadata:\n  status: active\n"))
+            self.assertTrue(ms.superset(after, before))
+        self.assertTrue(os.listdir(ms.snapshots_dir()))
+        code, out = run(["--check"])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("PROVENANCE", out)
+
+    def test_fresh_unstamped_memory_is_pending_not_failing(self):
+        self.setup_everywhere(self.FM)
+        code, out = run(["--check"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("provenance pending: main: new-rule.md", out)
+
+    def test_memory_marked_superseded_is_never_defaulted(self):
+        fm = ["name: new-rule", "description: superseded by other-rule",
+              "metadata:", "  type: feedback"]
+        self.setup_everywhere(fm)
+        before = ms.read(os.path.join(ms.memdir("main"), "new-rule.md"))
+        code, out = run(["--scheduled"])
+        self.assertNotIn("stamped", out)
+        self.assertEqual(ms.read(os.path.join(ms.memdir("main"), "new-rule.md")), before)
+        code, out = run(["--check"])
+        self.assertEqual(code, 1)
+        self.assertIn("not defaulted: description says superseded/retired", out)
+
+    def test_stamp_status_top_level_without_metadata_block(self):
+        text = "---\nname: x\ntype: feedback\n---\nbody\n"
+        self.assertEqual(ms.stamp_status(text),
+                         "---\nname: x\ntype: feedback\nstatus: active\n---\nbody\n")
 
 
 if __name__ == "__main__":
