@@ -174,19 +174,17 @@ except Exception: pass")
 for d in "$HOME_DIR"/Projects/*/; do
   [ -d "$d/.git" ] || continue
   repo=$(basename "$d")
-  # Per-branch: commits not reachable from ANY remote ref, not just origin/<default>.
-  # A branch GitHub squash-merged (or whose commits already landed under a different
-  # remote ref) has no upstream and diverges from the default branch, but its commits
-  # ARE reachable from some remote -- so it must never be counted as unpushed
-  # (board #987/#242: the old ancestor-of-default-branch check treated every
-  # squash-merged branch as permanently unpushed and buried real work under the noise).
-  unpushed=0
-  if ! printf '%s\n' "$REPO_LOCAL_ONLY" | grep -qx "$repo"; then
-    while IFS= read -r b; do
-      [ -z "$b" ] && continue
-      c=$(git -C "$d" rev-list --count "$b" --not --remotes 2>/dev/null)
-      unpushed=$((unpushed + ${c:-0}))
-    done < <(git -C "$d" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)
+  # Commits on ANY local branch that no remote ref contains. --not --remotes is
+  # what makes this correct for a squash-merged branch: such a branch has no
+  # upstream and diverges from the default branch, but its commits are reachable
+  # from some remote ref, so it must not read as unpushed work (board #987/#242:
+  # an ancestor-of-default-branch check called every squash-merged branch
+  # permanently unpushed and buried real work under the noise). Counted in ONE
+  # git call across all branches, never summed per branch: a commit reachable
+  # from two local branches would otherwise be counted twice.
+  unpushed=$(git -C "$d" log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr -d ' ')
+  if printf '%s\n' "$REPO_LOCAL_ONLY" | grep -qx "$repo"; then
+    unpushed=0
   fi
   if [ "${unpushed:-0}" -gt 0 ]; then
     add_finding "$repo" "repo-unpushed" "$repo: $unpushed commit(s) exist on local branches only (not on any remote) — push or rescue-push"
