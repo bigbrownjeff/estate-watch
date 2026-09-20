@@ -34,15 +34,21 @@ Heal classes:
         transcript in its 24h window (+2h pad) satisfies the same test.
   5. stuck:<original key>  (failtask's STANDING escalation cards)
      -> from ~/.claude/failures/failures.jsonl alone: the original key has
-        no row in the last HEAL_STUCK_QUIET_DAYS days (default 7), OR its
+        no row in the last HEAL_STUCK_QUIET_DAYS full days (default 7,
+        <=0 disables this path rather than closing everything), OR its
         red density (distinct local days with a row in the last
         FAILTASK_STUCK_WINDOW_DAYS days, default 14) has fallen under
         FAILTASK_STUCK_DAYS (default 5) — same two env knobs failtask
-        itself reads. Only healed when the log's oldest row is old enough
-        to trust the window being judged, and only when the card was
-        filed before the quiet period started (a log that cannot vouch
-        for the whole window, or a card/log timeline that contradicts
-        itself, means "no heal", never a guess).
+        itself reads. Quiet-and-healed closes as "healed"; density-only
+        (the key still has a recent row but fell under the threshold)
+        closes as "de-escalated", never claiming a still-firing key
+        healed. Refuses ("no heal") rather than guesses when: the log
+        can't be read, any line in it is unparseable (a corrupted tail
+        can't be told apart from a genuine stop), the key has zero rows
+        anywhere in the log, the key's newest row is dated after today,
+        the log's oldest row is too recent to trust the window being
+        judged, or the card was filed before the quiet period it is
+        supposedly proving even started.
 
 Everything else is left open and counted as "no machine-checkable heal" by
 failkey-class prefix, never guessed at.
@@ -539,18 +545,24 @@ def _load_failures_log():
     """Reads FAILURES_LOG once per sweep and caches it, the way
     `_launchctl_cache` caches `launchctl list`. Returns
     {"rows": [(row, dt), ...], "oldest_dt": dt or None, "readable": bool,
-    "reason": str or None}. A missing file, an empty file, or a file with
-    no parseable-ts rows are all "not readable", each with a reason naming
-    the log — never fatal, and never treated as evidence of quiet."""
+    "reason": str or None, "skipped": int}. A missing file, an empty file,
+    or a file with no parseable-ts rows are all "not readable", each with a
+    reason naming the log — never fatal, and never treated as evidence of
+    quiet. `skipped` counts lines dropped for a json failure, a non-dict
+    value, or an unparseable ts: a corrupted append (an interrupted write,
+    a concurrent-write interleave, a bad-byte run) most often lands in the
+    log's TAIL, the exact part the oldest-row span guard cannot see. So any
+    skip at all means the log cannot vouch for the window, and check_stuck
+    refuses to heal on it."""
     global _failures_log_cache
     if _failures_log_cache is not None:
         return _failures_log_cache
-    result = {"rows": [], "oldest_dt": None, "readable": False, "reason": None}
+    result = {"rows": [], "oldest_dt": None, "readable": False, "reason": None, "skipped": 0}
     if not os.path.isfile(FAILURES_LOG):
         result["reason"] = "%s not found" % FAILURES_LOG
         _failures_log_cache = result
         return result
-    rows, oldest = [], None
+    rows, oldest, skipped = [], None, 0
     try:
         with open(FAILURES_LOG, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -560,11 +572,14 @@ def _load_failures_log():
                 try:
                     row = json.loads(line)
                 except Exception:
+                    skipped += 1
                     continue  # an unreadable line is skipped, not fatal
                 if not isinstance(row, dict):
+                    skipped += 1
                     continue
                 dt = _parse_failure_row_ts(row.get("ts"))
                 if dt is None:
+                    skipped += 1
                     continue
                 rows.append((row, dt))
                 if oldest is None or dt < oldest:
@@ -575,9 +590,10 @@ def _load_failures_log():
         return result
     if not rows:
         result["reason"] = "%s has no parseable rows" % FAILURES_LOG
+        result["skipped"] = skipped
         _failures_log_cache = result
         return result
-    result.update(rows=rows, oldest_dt=oldest, readable=True)
+    result.update(rows=rows, oldest_dt=oldest, readable=True, skipped=skipped)
     _failures_log_cache = result
     return result
 
@@ -591,8 +607,17 @@ def check_stuck(card, now=None):
     flog = _load_failures_log()
     if not flog["readable"]:
         return None, "no heal — %s" % flog["reason"]
+    if flog["skipped"] > 0:
+        # A corrupted append usually corrupts the TAIL (an interrupted write,
+        # a concurrent-write interleave), exactly the part the oldest-row
+        # span guard below cannot see — so any unparseable line at all means
+        # the log cannot vouch for "quiet", not just the lines near it.
+        return None, ("no heal: %s has %d unparseable line(s); a log that cannot be "
+                       "fully read cannot vouch for quiet" % (FAILURES_LOG, flog["skipped"]))
 
-    quiet_days = heal_stuck_quiet_days()
+    quiet_days_raw = heal_stuck_quiet_days()
+    quiet_disabled = quiet_days_raw <= 0  # 0 (or negative) pauses the quiet path,
+    # same as failtask's own FAILTASK_STUCK_DAYS=0 pause switch for density.
     threshold = stuck_density_threshold()
     window_days = stuck_density_window_days()
 
@@ -602,7 +627,7 @@ def check_stuck(card, now=None):
     # The log must be able to vouch for the longer of the two windows being
     # judged, or "quiet"/"low density" could just mean "the log doesn't go
     # back that far" — indistinguishable from a genuine heal without this.
-    span_days = max(quiet_days, window_days)
+    span_days = window_days if quiet_disabled else max(quiet_days_raw, window_days)
     span_start = today - timedelta(days=span_days - 1)
     if flog["oldest_dt"].date() > span_start:
         return None, ("no heal — %s oldest row is %s, too short to judge the %d-day "
@@ -610,15 +635,22 @@ def check_stuck(card, now=None):
                        % (FAILURES_LOG, flog["oldest_dt"].date().isoformat(), span_days,
                           span_start.isoformat()))
 
-    quiet_start = today - timedelta(days=quiet_days - 1)
     filed_dt = datetime.fromtimestamp(filed_ts, tz=timezone.utc).astimezone()
-    if filed_dt.date() >= quiet_start:
-        # A card filed inside (or after) the quiet window it is supposedly
-        # proving is a contradiction (e.g. filed yesterday for a key that
-        # last fired over a week ago) — leave it open rather than trust it.
-        return None, ("no heal — card filed %s is not before the %d-day quiet window "
-                       "starting %s; filed/last-fire timestamps are inconsistent, leaving open"
-                       % (filed_dt.date().isoformat(), quiet_days, quiet_start.isoformat()))
+    if quiet_disabled:
+        quiet_start = None
+    else:
+        # "no row in the last N full days": the N completed days before
+        # today, so a row exactly N days old still counts as within the
+        # window (today itself is checked too: a row filed today is
+        # obviously not quiet, whatever N is).
+        quiet_start = today - timedelta(days=quiet_days_raw)
+        if filed_dt.date() >= quiet_start:
+            # A card filed inside (or after) the quiet window it is supposedly
+            # proving is a contradiction (e.g. filed yesterday for a key that
+            # last fired over a week ago) — leave it open rather than trust it.
+            return None, ("no heal — card filed %s is not before the %d-day quiet window "
+                           "starting %s; filed/last-fire timestamps are inconsistent, leaving open"
+                           % (filed_dt.date().isoformat(), quiet_days_raw, quiet_start.isoformat()))
 
     density_start = today - timedelta(days=window_days - 1)
     last_dt = None
@@ -635,21 +667,47 @@ def check_stuck(card, now=None):
         d = dt.date()
         if density_start <= d <= today:
             density_days.add(d)
-        if quiet_start <= d <= today:
+        if quiet_start is not None and quiet_start <= d <= today:
             quiet_violated = True
 
-    quiet_ok = not quiet_violated
+    # A card exists only because failtask saw this key fire; a log with zero
+    # rows for it anywhere is not evidence the key stopped, it's evidence the
+    # log no longer has the history that filed this card (rotation, a wrong
+    # key, a lost append). Refuse rather than read silence as a heal.
+    if last_dt is None:
+        return None, ("no heal: %s has no rows anywhere in %s; the log that filed this "
+                       "card apparently no longer has any record of it firing"
+                       % (original_key, FAILURES_LOG))
+    # A row dated after today (clock skew, a bad UTC offset) is invisible to
+    # both windows above and would otherwise let the evidence string claim
+    # "0 red days" in the same breath as naming that future row.
+    if last_dt.date() > today:
+        return None, ("no heal: %s has a future-dated row at %s (clock skew?); refusing "
+                       "to trust the log's recency for this key, from %s"
+                       % (original_key, last_dt.isoformat(), FAILURES_LOG))
+
+    quiet_ok = (not quiet_disabled) and (not quiet_violated)
     density_ok = len(density_days) < threshold
     if not (quiet_ok or density_ok):
         return None, ("no heal — %s still red: last row %s, %d red day(s) of the last %d "
                        "as of %s (threshold %d)"
-                       % (original_key, last_dt.isoformat() if last_dt else "never",
-                          len(density_days), window_days, today.isoformat(), threshold))
+                       % (original_key, last_dt.isoformat(), len(density_days), window_days,
+                          today.isoformat(), threshold))
 
-    return ("stuck:%s healed: last row at %s, %d red day(s) of the last %d as of %s "
-             "(threshold %d), from %s"
-             % (original_key, last_dt.isoformat() if last_dt else "none on record",
-                len(density_days), window_days, today.isoformat(), threshold, FAILURES_LOG)), None
+    if quiet_ok:
+        return ("stuck:%s healed: last row at %s, %d red day(s) of the last %d as of %s "
+                 "(threshold %d), from %s"
+                 % (original_key, last_dt.isoformat(), len(density_days), window_days,
+                    today.isoformat(), threshold, FAILURES_LOG)), None
+
+    # density_ok only: the key is still actively firing (a row inside the
+    # quiet window, or the quiet path is disabled) but has fallen under the
+    # density threshold. De-escalate the STANDING card rather than claim
+    # the failure "healed" while it is still recent.
+    return ("stuck:%s de-escalated: no longer standing (still active, last row at %s), "
+             "%d red day(s) of the last %d as of %s (threshold %d), from %s"
+             % (original_key, last_dt.isoformat(), len(density_days), window_days,
+                today.isoformat(), threshold, FAILURES_LOG)), None
 
 
 # --------------------------------------------------------------------- classify
@@ -786,9 +844,11 @@ def main():
                  ", ".join("%s=%d" % (k, len(v)) for k, v in sorted(skipped.items(), key=lambda x: -len(x[1]))[:8])))
     # Always loud, even under --quiet: this is the one line that proves a heal
     # ran and what it did, per memory fixes-that-quiet-alerts-leave-a-trace.
+    # Carries the same [dry-run] marker log() uses, so a rehearsal run never
+    # leaves a pulse.log line indistinguishable from a real close.
     try:
         with open(PULSE_LOG, "a") as f:
-            f.write("heal-sweep: %s %s\n" % (now_iso(), report))
+            f.write("heal-sweep: %s %s%s\n" % (now_iso(), "[dry-run] " if DRYRUN else "", report))
     except Exception:
         pass
     print("heal-sweep: " + report)

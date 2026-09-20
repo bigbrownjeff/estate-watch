@@ -88,31 +88,50 @@ class HealSweepStuckTests(unittest.TestCase):
         self.assertIsNone(evidence, str((evidence, reason)))
         self.assertIn("still red", reason)
 
-    def test_mutation_quiet_threshold_off_by_one(self):
-        """Proof the quiet test actually catches a regression: widening the
-        quiet comparison by one day would wrongly heal the 6-day case."""
-        rows = [row("k1", d) for d in (6, 9, 10, 11, 12)]
-        rows += [row("k1", d) for d in range(13, 30)]
+    def test_quiet_exactly_7_days_ago_does_not_heal(self):
+        """Cold-review finding: 'no row in the last N full days' must count
+        a row exactly N days old as still inside the window, the boundary
+        the original formula (today - (N-1)) got wrong by one day. Density
+        pinned AT the threshold (5, not below) so only the quiet boundary
+        decides."""
+        rows = [row("k9", d) for d in (7, 9, 10, 11, 12)]  # 5 distinct days
+        rows += [row("other", d) for d in range(13, 30)]   # span padding only
+        write_jsonl(self.mod.FAILURES_LOG, rows)
+        evidence, reason = self.mod.check_stuck(stuck_card("k9", 20), now=NOW)
+        self.assertIsNone(evidence, str((evidence, reason)))
+        self.assertIn("still red", reason)
+
+    def test_mutation_quiet_boundary_off_by_one(self):
+        """Proof the fixed boundary formula actually catches a regression:
+        narrowing quiet_start by one day (reverting toward the old,
+        off-by-one formula) wrongly heals the exactly-7-days-ago case."""
+        rows = [row("k9", d) for d in (7, 9, 10, 11, 12)]
+        rows += [row("other", d) for d in range(13, 30)]
         write_jsonl(self.mod.FAILURES_LOG, rows)
         import inspect
         src = inspect.getsource(self.mod.check_stuck)
+        marker = "quiet_start = today - timedelta(days=quiet_days_raw)"
+        self.assertIn(marker, src, "quiet boundary line not found to mutate")
         mutated = src.replace(
-            "quiet_start = today - timedelta(days=quiet_days - 1)",
-            "quiet_start = today - timedelta(days=quiet_days - 2)", 1)
+            marker, "quiet_start = today - timedelta(days=quiet_days_raw - 1)", 1)
         self.assertNotEqual(src, mutated, "mutation target string not found")
         ns = dict(self.mod.__dict__)
         exec(compile(mutated, "<mutated check_stuck>", "exec"), ns)
-        evidence, reason = ns["check_stuck"](stuck_card("k1", 20), now=NOW)
+        evidence, reason = ns["check_stuck"](stuck_card("k9", 20), now=NOW)
         self.assertIsNotNone(evidence, "mutation was not caught: still refused to heal")
 
     # -------------------------------------------------------------- test 2
-    def test_density_4_of_14_with_row_yesterday_heals(self):
+    def test_density_4_of_14_with_row_yesterday_de_escalates_not_heals(self):
+        # Cold-review finding: a key with a row yesterday is still active,
+        # so closing this card must say "de-escalated", never "healed".
         rows = [row("k2", d) for d in (1, 4, 8, 13)]  # 4 distinct days, most recent yesterday
         rows += [row("other", d) for d in range(14, 30)]  # pads the log span only
         write_jsonl(self.mod.FAILURES_LOG, rows)
         evidence, reason = self.mod.check_stuck(stuck_card("k2", 20), now=NOW)
         self.assertIsNotNone(evidence, reason)
         self.assertIn("4 red day", evidence)
+        self.assertIn("de-escalated", evidence)
+        self.assertNotIn("healed:", evidence)
 
     def test_density_5_of_14_does_not_heal(self):
         rows = [row("k2", d) for d in (1, 4, 6, 8, 13)]  # 5 distinct days
@@ -190,15 +209,42 @@ class HealSweepStuckTests(unittest.TestCase):
         evidence, reason = ns["check_stuck"](stuck_card("k4", 20), now=NOW)
         self.assertIsNotNone(evidence, "mutation was not caught: span-guardless code still refused to heal")
 
+    def test_partly_unreadable_log_refuses_not_heals(self):
+        """Cold-review finding: a log whose tail is garbled (an interrupted
+        append, a concurrent-write interleave) is indistinguishable from a
+        genuine stop to the oldest-row span guard alone, since the guard
+        only looks at the oldest row. Any skipped line at all must refuse
+        to heal, naming the log and the skip count."""
+        good_rows = [row("k12", d) for d in (8, 9, 10, 11, 12)]
+        good_rows += [row("k12", d) for d in range(13, 30)]
+        lines = [json.dumps(r) for r in good_rows]
+        lines.append("{not valid json")
+        lines.append(json.dumps({"key": "k12", "project": "infra", "title": "no ts"}))
+        with open(self.mod.FAILURES_LOG, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        evidence, reason = self.mod.check_stuck(stuck_card("k12", 20), now=NOW)
+        self.assertIsNone(evidence, str((evidence, reason)))
+        self.assertIn(self.mod.FAILURES_LOG, reason)
+        self.assertIn("unparseable", reason)
+
+    def test_zero_rows_for_key_does_not_heal(self):
+        """Cold-review finding: a card exists only because failtask saw this
+        key fire. A log with zero rows for it anywhere (not even outside
+        the judged window) is evidence the log lost the key's history, not
+        evidence the key stopped."""
+        rows = [row("other", d) for d in range(0, 30)]
+        write_jsonl(self.mod.FAILURES_LOG, rows)
+        evidence, reason = self.mod.check_stuck(stuck_card("k11", 20), now=NOW)
+        self.assertIsNone(evidence, str((evidence, reason)))
+        self.assertIn("no rows anywhere", reason)
+
     # -------------------------------------------------------------- test 5
-    def test_bookkeeping_malformed_and_no_ts_rows_are_skipped(self):
+    def test_bookkeeping_row_does_not_count_as_firing(self):
         good_rows = [row("k5", d) for d in (8, 9, 10, 11, 12)]
         good_rows += [row("k5", d) for d in range(13, 30)]
         lines = [json.dumps(r) for r in good_rows]
         lines.append(json.dumps({"ts": ts_days_ago(1), "key": "stuck:k5",
                                   "project": "infra", "title": "x", "label": "STANDING"}))
-        lines.append("{not valid json")
-        lines.append(json.dumps({"key": "k5", "project": "infra", "title": "no ts"}))
         with open(self.mod.FAILURES_LOG, "w") as f:
             f.write("\n".join(lines) + "\n")
         evidence, reason = self.mod.check_stuck(stuck_card("k5", 20), now=NOW)
@@ -240,16 +286,84 @@ class HealSweepStuckTests(unittest.TestCase):
         finally:
             del os.environ["FAILTASK_STUCK_DAYS"]
 
-    def test_env_quiet_days_3_heals_a_4_day_quiet_key(self):
+    def test_env_quiet_days_changes_the_outcome(self):
+        # Cold-review finding: the original fixture (4 distinct red days)
+        # was vacuous: density alone (4 < default threshold 5) always
+        # healed it regardless of the quiet knob. Pinned at 5 red days (AT
+        # the threshold, so density_ok is False either way) so only the
+        # quiet knob decides, and both halves are asserted in one test.
+        rows = [row("k8", d) for d in (4, 6, 8, 10, 12)]  # 5 distinct days
+        rows += [row("other", d) for d in range(13, 30)]
+        write_jsonl(self.mod.FAILURES_LOG, rows)
+
         os.environ["HEAL_STUCK_QUIET_DAYS"] = "3"
         try:
-            rows = [row("k8", d) for d in (4, 6, 8, 10)]
-            rows += [row("other", d) for d in range(11, 30)]
-            write_jsonl(self.mod.FAILURES_LOG, rows)
             evidence, reason = self.mod.check_stuck(stuck_card("k8", 20), now=NOW)
             self.assertIsNotNone(evidence, reason)
         finally:
             del os.environ["HEAL_STUCK_QUIET_DAYS"]
+
+        # Without the knob (default 7), the same fixture must NOT heal: the
+        # most recent row (4 days ago) is inside the default 7-day window.
+        evidence, reason = self.mod.check_stuck(stuck_card("k8", 20), now=NOW)
+        self.assertIsNone(evidence, str((evidence, reason)))
+
+    def test_env_quiet_days_0_disables_quiet_path_not_all_healing(self):
+        """Cold-review finding: HEAL_STUCK_QUIET_DAYS<=0 must not become a
+        closes-everything switch. failtask documents 0 as its OWN pause
+        value for the sibling knob, so 0 here must mean 'disable the quiet
+        path', never 'shrink the window to nothing'. A key firing every day
+        including today, with density at the max (14 of 14), must not
+        close."""
+        rows = [row("k10", d) for d in range(0, 14)]  # every day, including today
+        write_jsonl(self.mod.FAILURES_LOG, rows)
+        os.environ["HEAL_STUCK_QUIET_DAYS"] = "0"
+        try:
+            evidence, reason = self.mod.check_stuck(stuck_card("k10", 20), now=NOW)
+            self.assertIsNone(evidence, str((evidence, reason)))
+        finally:
+            del os.environ["HEAL_STUCK_QUIET_DAYS"]
+        # -1 must behave the same as 0.
+        os.environ["HEAL_STUCK_QUIET_DAYS"] = "-1"
+        try:
+            self.mod._failures_log_cache = None
+            evidence, reason = self.mod.check_stuck(stuck_card("k10", 20), now=NOW)
+            self.assertIsNone(evidence, str((evidence, reason)))
+        finally:
+            del os.environ["HEAL_STUCK_QUIET_DAYS"]
+
+    # ------------------------------------------------------ future-dated row
+    def test_future_dated_row_refuses_to_heal(self):
+        """Cold-review finding: a row dated after today (clock skew, a bad
+        UTC offset) is invisible to both windows, which would otherwise let
+        the evidence string claim '0 red days' in the same breath as naming
+        that future row."""
+        rows = [row("k13", -1)]  # dated tomorrow
+        rows += [row("other", d) for d in range(0, 30)]
+        write_jsonl(self.mod.FAILURES_LOG, rows)
+        evidence, reason = self.mod.check_stuck(stuck_card("k13", 20), now=NOW)
+        self.assertIsNone(evidence, str((evidence, reason)))
+        self.assertIn("future-dated", reason)
+
+
+class HealSweepDryRunPulseLogTests(unittest.TestCase):
+    def test_dry_run_report_line_is_marked(self):
+        """Cold-review finding: --dry-run's final summary line in pulse.log
+        must carry the same [dry-run] marker log() uses, so a rehearsal run
+        is never indistinguishable from a real close in the pulse log."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        mod = load_heal_sweep()
+        mod.PULSE_LOG = os.path.join(tmp.name, "pulse.log")
+        mod.DRYRUN = True
+        mod.find_gh = lambda: "/usr/bin/true"
+        mod.load_open_failure_cards = lambda: []
+        mod.main()
+        with open(mod.PULSE_LOG) as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+        self.assertTrue(lines, "pulse.log got no lines written")
+        self.assertIn("[dry-run]", lines[-1],
+                       "dry-run report line missing the [dry-run] marker: %r" % lines[-1])
 
 
 if __name__ == "__main__":
