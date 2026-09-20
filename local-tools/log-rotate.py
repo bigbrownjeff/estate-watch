@@ -38,6 +38,12 @@ _UNREADABLE = (OSError, EOFError, zlib.error)
 # path: file to watch.
 # max_bytes: rotate when the live file exceeds this size.
 # keep: how many gzipped generations to retain (oldest beyond this are deleted).
+# failtask's age escalation (local-tools/failtask) reads a FAILTASK_STUCK_WINDOW_DAYS
+# (default 14) lookback from ~/.claude/failures/failures.jsonl on every call. That
+# file must NEVER be added here as a truncate-rotate target: rotation would zero the
+# window and silently stop all escalation with no error. If it ever needs rotation,
+# it must be a rename-and-keep-appending scheme that failtask's own reader can span,
+# not this truncate-on-size approach.
 TARGETS: List[Dict] = [
     {
         "path": "/opt/homebrew/var/log/ollama.log",

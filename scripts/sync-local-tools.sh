@@ -22,6 +22,7 @@ rows=(
   "local-tools/board-ref|$HOME/.claude/bin/board-ref|0755"
   "local-tools/failtask|$HOME/.claude/bin/failtask|0755"
   "local-tools/tests/test_failtask_issue_path.py|$HOME/.claude/bin/tests/test_failtask_issue_path.py|0755"
+  "local-tools/tests/test_failtask_age_escalation.py|$HOME/.claude/bin/tests/test_failtask_age_escalation.py|0755"
   "local-tools/tests/test_gh_board_export_comments.sh|$HOME/.claude/bin/tests/test_gh_board_export_comments.sh|0755"
   "local-tools/burn-meter.py|$HOME/.claude/bin/burn-meter.py|0755"
   "local-tools/hooks/turn-cap-gate.py|$HOME/.claude/hooks/turn-cap-gate.py|0755"

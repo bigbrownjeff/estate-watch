@@ -16,7 +16,12 @@ import re
 import sys
 import types
 
-FAILTASK_PATH = os.path.expanduser("~/.claude/bin/failtask")
+# Both layouts (repo: local-tools/failtask + local-tools/tests/; installed:
+# ~/.claude/bin/failtask + ~/.claude/bin/tests/) put the tool one directory
+# above this test file, so resolving relative to __file__ is right in both;
+# FAILTASK_PATH overrides for anything else.
+FAILTASK_PATH = os.environ.get("FAILTASK_PATH") or os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "failtask"))
 GH = "FAKE_GH"
 
 
