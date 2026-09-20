@@ -311,6 +311,51 @@ class TestDecide(Base):
         self.assertEqual(action, "promote")
         self.assertEqual(winner, "claudine")
 
+    def test_drop_modified_line_strips_frontmatter_stamp_only(self):
+        text = "---\nname: x\nmodified: 2026-09-01\ntype: feedback\n---\nmodified: not a stamp\nBody.\n"
+        out = ms.drop_modified_line(text)
+        self.assertNotIn("modified: 2026-09-01", out)
+        self.assertIn("name: x", out)
+        self.assertIn("type: feedback", out)
+        # A body line that merely starts with "modified:" is untouched.
+        self.assertIn("modified: not a stamp", out)
+
+    def test_drop_modified_line_noop_without_frontmatter(self):
+        text = "Body.\nmodified: not a stamp\n"
+        self.assertEqual(ms.drop_modified_line(text), text)
+
+    def test_decide_promotes_pure_append_despite_modified_bump(self):
+        # CARD-880 (2026-09-02): 5 of 6 quarantined conflicts were pure
+        # appends on one side, but the frontmatter modified: bump made the
+        # diff a change-hunk too, so superset() saw a replace and reported
+        # conflict instead of promote. This is that exact shape.
+        base = "---\nmodified: 2026-09-01\n---\nRule A applies.\n"
+        appended = "---\nmodified: 2026-09-02\n---\nRule A applies.\nAlso rule B applies.\n"
+        per = {
+            "main": {"text": base, "sha": ms.sha(base), "mtime": 0, "modified": "2026-09-01",
+                     "eligible": True, "reason": "type: feedback"},
+            "claudine": {"text": appended, "sha": ms.sha(appended), "mtime": 0,
+                         "modified": "2026-09-02", "eligible": True, "reason": "type: feedback"},
+        }
+        action, winner, detail = ms.decide("x.md", per)
+        self.assertEqual(action, "promote")
+        self.assertEqual(winner, "claudine")
+
+    def test_decide_still_conflicts_on_reorder_with_modified_bump(self):
+        # Real-conflict path unchanged: a modified: bump must never launder
+        # an actual reorder (or any other real content difference) into a
+        # promotion just because both sides also got a timestamp stamp.
+        a = "---\nmodified: 2026-09-01\n---\nALLOW x\nDENY y\n"
+        b = "---\nmodified: 2026-09-02\n---\nDENY y\nALLOW x\n"
+        per = {
+            "main": {"text": a, "sha": ms.sha(a), "mtime": 0, "modified": "2026-09-01",
+                     "eligible": True, "reason": "type: feedback"},
+            "claudine": {"text": b, "sha": ms.sha(b), "mtime": 0, "modified": "2026-09-02",
+                         "eligible": True, "reason": "type: feedback"},
+        }
+        action, winner, detail = ms.decide("x.md", per)
+        self.assertEqual(action, "conflict")
+
     def test_decide_flags_divergent_ineligible_copy(self):
         elig_text = "Doctrine body.\n"
         other_text = "Different local note.\n"
