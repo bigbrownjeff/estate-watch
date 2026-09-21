@@ -408,6 +408,37 @@ class UrlSemanticsTest(unittest.TestCase):
         }
         self.assertEqual("UNVERIFIED", estate_drift.evaluate_url(check, probe)["state"])
 
+    def _gone(self, nxdomain, expect="retired"):
+        check = {"id": "gone", "type": "url", "expect": expect, "allowed_status": [404, 410]}
+        probe = {"status": 0, "final_url": "https://old.example.test/", "redirects": [],
+                 "verified": "2026-09-21", "error": "URLError: nodename nor servname",
+                 "nxdomain": nxdomain}
+        return estate_drift.evaluate_url(check, probe)["state"]
+
+    def test_answered_nxdomain_is_retirement_evidence(self):
+        self.assertEqual("PASS", self._gone(True))
+        self.assertEqual("PASS", self._gone(True, expect="unpublished"))
+
+    def test_unanswered_or_resolving_name_stays_unverified(self):
+        self.assertEqual("UNVERIFIED", self._gone(None))
+        self.assertEqual("UNVERIFIED", self._gone(False))
+
+    def test_nxdomain_never_passes_a_surface_that_should_be_up(self):
+        for expect in ("public", "gated", "paused"):
+            self.assertEqual("UNVERIFIED", self._gone(True, expect=expect))
+
+    def test_confirm_nxdomain_needs_every_resolver_to_answer(self):
+        original = estate_drift.doh_status
+        try:
+            for answers, expected in (([3, 3], True), ([3, None], None),
+                                      ([3, 0], False), ([None, None], None)):
+                replies = iter(answers)
+                estate_drift.doh_status = lambda resolver, host, timeout=8.0: next(replies)
+                self.assertIs(expected, estate_drift.confirm_nxdomain("old.example.test"))
+            self.assertIsNone(estate_drift.confirm_nxdomain(""))
+        finally:
+            estate_drift.doh_status = original
+
     def test_unpublished_surface_is_not_labeled_retired(self):
         check = {"id": "planned", "type": "url", "expect": "unpublished", "allowed_status": [404]}
         probe = {"status": 404, "final_url": "https://planned.example.test/", "redirects": [], "verified": "2026-08-06", "error": ""}

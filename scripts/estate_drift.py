@@ -460,6 +460,39 @@ class RecordingRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+DOH_RESOLVERS = (
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/resolve",
+)
+
+
+def doh_status(resolver: str, host: str, timeout: float = 8.0) -> int | None:
+    """DNS RCODE for host's A record from one DNS-over-HTTPS resolver, or None."""
+    query = urllib.parse.urlencode({"name": host, "type": "A"})
+    req = urllib.request.Request(
+        f"{resolver}?{query}", headers={"Accept": "application/dns-json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return int(json.loads(response.read(65_536)).get("Status"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError):
+        return None
+
+
+def confirm_nxdomain(host: str) -> bool | None:
+    """True only when every independent resolver ANSWERS that the name does not exist.
+
+    An answered NXDOMAIN (RCODE 3) proves the network was up and the name is gone,
+    which is the strongest retirement evidence there is. Any resolver that fails
+    to answer leaves the question open (None), so an offline run stays UNVERIFIED.
+    """
+    if not host:
+        return None
+    statuses = [doh_status(resolver, host) for resolver in DOH_RESOLVERS]
+    if any(status is None for status in statuses):
+        return None
+    return all(status == 3 for status in statuses)
+
+
 def probe_url(url: str, timeout: float = 20.0,
               required_body_pattern: str | None = None,
               forbidden_body_pattern: str | None = None) -> dict[str, Any]:
@@ -502,7 +535,11 @@ def probe_url(url: str, timeout: float = 20.0,
         status = 0
         final_url = url
         error = f"{exc.__class__.__name__}: {getattr(exc, 'reason', exc)}"
+    nxdomain = None
+    if status == 0:
+        nxdomain = confirm_nxdomain(urllib.parse.urlsplit(url).hostname or "")
     return {
+        "nxdomain": nxdomain,
         "status": status,
         "final_url": final_url,
         "redirects": redirects.redirects,
@@ -550,6 +587,11 @@ def evaluate_url(check: dict[str, Any], probe: dict[str, Any]) -> dict[str, Any]
         ],
     }
     if status == 0:
+        if expect in {"unpublished", "retired"} and probe.get("nxdomain") is True:
+            return result(
+                check, "PASS",
+                detail + " nxdomain=confirmed by every resolver",
+                probe=sanitized_probe)
         return result(check, "UNVERIFIED", detail, probe=sanitized_probe)
 
     okay = status in allowed
