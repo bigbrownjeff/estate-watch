@@ -1,6 +1,6 @@
 {
  "version": 1,
- "verified": "2026-09-18",
+ "verified": "2026-09-21",
  "install_root": "${HOME}/.claude/skills",
  "skills": [
   {
@@ -83,6 +83,11 @@
    "name": "notes-log",
    "mode": "same_tree",
    "source": "${PROJECTS}/notes-vault/skills/notes-log"
+  },
+  {
+   "name": "worklist",
+   "mode": "same_tree",
+   "source": "${PROJECTS}/notes-vault/skills/worklist"
   },
   {
    "name": "orchestrate",
