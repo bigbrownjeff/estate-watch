@@ -50,3 +50,13 @@ gzipped with retention, never deleted outright). Targets are a data table at the
 the file; ollama's is `max_bytes` 64 MB, `keep` 6 generations. `com.jeffpinto.log-rotate`
 (launchd/com.jeffpinto.log-rotate.plist) runs it with `--apply` daily; `--dry-run` is the
 default with no flags and writes nothing.
+
+`local-tools/interpreter-lint.py` fails on any `~/Library/LaunchAgents/com.jeff*.plist`, or
+any script such a plist launches, that names the python.org framework python
+(`/Library/Frameworks/Python.framework`): that build exists on one machine only, and the
+2026-09-23 Mac Studio move found 7 plists and 5 launched scripts pinned to it. The portable
+pins are the repo's own `.venv` or `/opt/homebrew/bin/python3.12`. fleet-sentinel runs it
+4x/day (warn finding `interp-framework-pin:<label>` on the job's project card, `interp-lint-broken`
+if the lint itself fails) and the weekly hygiene report prints its output. A deliberate probe line
+with a portable fallback carries `# interp-lint: probe` and is counted, not flagged. `launchd/com.jeffpinto.deliverables-sweep.plist` is the
+versioned copy of the nightly vault deliverables sweep, on Homebrew 3.12.

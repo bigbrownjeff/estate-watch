@@ -41,6 +41,9 @@ rows=(
   "local-tools/log-rotate.py|$HOME/.claude/bin/log-rotate.py|0755"
   "local-tools/tests/test_log_rotate.py|$HOME/.claude/bin/tests/test_log_rotate.py|0755"
   "local-tools/tests/test_heal_sweep_stuck.py|$HOME/.claude/bin/tests/test_heal_sweep_stuck.py|0755"
+  "local-tools/interpreter-lint.py|$HOME/.claude/bin/interpreter-lint.py|0755"
+  "local-tools/tests/test_interpreter_lint.py|$HOME/.claude/bin/tests/test_interpreter_lint.py|0755"
+  "local-tools/deliverables-sweep.py|$HOME/.claude/bin/deliverables-sweep.py|0755"
 )
 
 case "$mode" in
