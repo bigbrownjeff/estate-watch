@@ -116,6 +116,34 @@ for plist in "$HOME_DIR"/Library/LaunchAgents/com.jeff*.plist "$HOME_DIR"/Librar
   fi
 done
 
+# ---------- Check 1b: interpreter paths ----------
+# A plist, or a script a plist launches, that names the python.org framework
+# python runs on exactly one machine (2026-09-23: 7 plists and 5 scripts failed on
+# the Mac Studio, which has Homebrew 3.12 only). One warn finding per hit, coded
+# with its label so a new pin in the same project re-files. A lint crash is a
+# finding of its own, never "clean". Source: estate-watch local-tools/interpreter-lint.py.
+INTERP_LINT="$BIN/interpreter-lint.py"
+if [ -f "$INTERP_LINT" ]; then
+  LINT_OUT="$(mktemp "${TMPDIR:-/tmp}/interp-lint.XXXXXX")"
+  "$PY" "$INTERP_LINT" --quiet >"$LINT_OUT" 2>"$LINT_OUT.err"; lint_rc=$?
+  if [ "$lint_rc" -ge 2 ] || [ -s "$LINT_OUT.err" ]; then
+    add_finding infra "interp-lint-broken" "interpreter-lint exited $lint_rc: $(tail -c 300 "$LINT_OUT.err" | tr '|\n' '/ ') — the framework-python check is NOT running; fix the lint"
+  fi
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    line="${line//|//}"
+    label="${line%%: *}"; rest="${line#*: }"; code="${rest%%: *}"; detail="${rest#*: }"
+    case "$code" in
+      framework-pin) advice=" — point it at the repo's .venv or /opt/homebrew/bin/python3.12; a deliberate probe line with a portable fallback carries '# interp-lint: probe'" ;;
+      *) advice=" — fix the plist so launchd, plutil and plistlib all read it as a dict" ;;
+    esac
+    add_finding "$(proj_for_label "$label")" "interp-$code:$label" "$label: $detail$advice"
+  done < "$LINT_OUT"
+  rm -f "$LINT_OUT" "$LINT_OUT.err"
+else
+  echo "fleet-sentinel: interpreter-lint missing at $INTERP_LINT — framework-python pins go unchecked"
+fi
+
 # ---------- Checks 2 + 3: log recency + credential ages (from config) ----------
 "$PY" - "$CONFIG" <<'PY' >> "$FINDINGS"
 import json, os, sys, time

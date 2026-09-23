@@ -229,11 +229,24 @@ PY_EOF
   echo '```'
 } >> "$report" || true
 
+# Interpreter pins: a plist or launched script naming the python.org framework
+# python runs on one machine only (2026-09-23 Studio move: 7 plists, 5 scripts).
+{
+  echo
+  echo "## Interpreter pins (estate-watch local-tools/interpreter-lint.py)"
+  echo '```'
+  if [ -f "$HOME/.claude/bin/interpreter-lint.py" ]; then
+    /usr/bin/python3 "$HOME/.claude/bin/interpreter-lint.py" 2>&1 || echo "PINNED: point each hit at the repo .venv or /opt/homebrew/bin/python3.12 (a deliberate probe line carries '# interp-lint: probe')"
+  else
+    echo "CANT-TELL: ~/.claude/bin/interpreter-lint.py not installed (run estate-watch scripts/sync-local-tools.sh --install)"
+  fi
+  echo '```'
+} >> "$report" || true
+
 # Versioned-source drift: every tool under ~/.claude/bin that estate-watch owns
 # must match its repo copy, in both directions (2026-09-09: four watchdog fixes
 # existed only on this disk until the table grew).
 {
-  echo
   echo "## Local tools drift (estate-watch scripts/sync-local-tools.sh --check)"
   echo '```'
   if [ -x "$HOME/Projects/estate-watch/scripts/sync-local-tools.sh" ]; then
