@@ -25,7 +25,7 @@
   </dict>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>35</integer></dict>
-  <key>StandardOutPath</key><string>/Users/jeffpinto/.claude/logs/deliverables-sweep.log</string>
-  <key>StandardErrorPath</key><string>/Users/jeffpinto/.claude/logs/deliverables-sweep.log</string>
+  <key>StandardOutPath</key><string>/Users/jeffpinto/Library/Logs/deliverables-sweep.log</string>
+  <key>StandardErrorPath</key><string>/Users/jeffpinto/Library/Logs/deliverables-sweep.log</string>
 </dict>
 </plist>
