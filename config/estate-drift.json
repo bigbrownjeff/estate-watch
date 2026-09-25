@@ -22,7 +22,7 @@
     {
       "id": "client-workup-install",
       "type": "same_file",
-      "source": "${PROJECTS}/client-pitches/.claude/skills/client-workup/SKILL.md",
+      "source": "${PROJECTS}/outbound_with_jeff_and_marv/.claude/skills/client-workup/SKILL.md",
       "target": "${HOME}/.claude/skills/client-workup/SKILL.md"
     },
     {

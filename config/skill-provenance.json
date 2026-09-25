@@ -22,7 +22,7 @@
   {
    "name": "client-workup",
    "mode": "same_tree",
-   "source": "${PROJECTS}/client-pitches/.claude/skills/client-workup"
+   "source": "${PROJECTS}/outbound_with_jeff_and_marv/.claude/skills/client-workup"
   },
   {
    "name": "cloudflare",
