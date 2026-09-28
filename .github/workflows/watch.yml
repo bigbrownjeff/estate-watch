@@ -130,6 +130,9 @@ jobs:
           check_url "retired:bridgetheiep"       "https://bridgetheiep.pages.dev/" gated
           check_url "retired:bridgetheiep.com"   "https://bridgetheiep.com/" gated
           check_url "retired:bridge-the-iep.com" "https://bridge-the-iep.com/" gated
+          # Deleted deployment a8a6cab7 still served the old site on 2026-09-28 after the API said it was gone;
+          # stays red until Cloudflare drops it or an Access app covers *.bridgetheiep.pages.dev.
+          check_url "retired:bridgetheiep-a8a6cab7" "https://a8a6cab7.bridgetheiep.pages.dev/" gated
           check_url "loop-lab"             "https://loop-lab.jeffpinto.com/" public "" "Loop Lab"
           check_url "solar-sizing"         "https://bigbrownjeff.github.io/solar-sizing/" public "" "Honest solar sizing"
           check_url "line-judge-drift"     "https://line-judge-drift-f1d8e1.jeffpinto.com/" public "" "An AI line judge that drifts"
