@@ -247,9 +247,18 @@ rtype=$(rclone config show "${REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
 
 # Preflight before the push, short timeout, so a dead OAuth token or a dead
 # network is named distinctly instead of falling through to the same
-# "0 objects" message a genuinely empty push would also produce.
-preflight_err=$(rclone lsd --max-depth 1 "$REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null) \
-  || die "offsite preflight failed for $REMOTE (auth or reachability); rclone said: $preflight_err"
+# "0 objects" message a genuinely empty push would also produce. rc=3 is
+# rclone's own "directory not found" exit code, which is what a remote PATH
+# that has never been pushed to returns on its first-ever run -- reachable
+# and authenticated, just empty so far. Only OTHER nonzero codes are a real
+# auth/reachability failure. Found by local-tools/tests/test_ops_snapshot.sh:
+# the claude-memory leg below pushes to a remote path with no prior history,
+# so without this its very first production run would die here every time.
+preflight_err=$(rclone lsd --max-depth 1 "$REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null)
+preflight_rc=$?
+if [ "$preflight_rc" -ne 0 ] && [ "$preflight_rc" -ne 3 ]; then
+  die "offsite preflight failed for $REMOTE (auth or reachability); rclone said: $preflight_err"
+fi
 
 # rc captured directly from rclone, never through a pipe. `cmd | tail -3` in an
 # `if` tests tail's exit status, not rclone's, so a failed push still printed
@@ -292,8 +301,11 @@ if [ "${OPS_MEMORY_VAULT_OFFSITE:-1}" = "1" ]; then
     mrtype=$(rclone config show "${MEMORY_REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
     [ "$mrtype" = "crypt" ] || die "refusing claude-memory offsite: remote ${MEMORY_REMOTE%%:*} is type '${mrtype:-unknown}', not crypt"
 
-    mpre_err=$(rclone lsd --max-depth 1 "$MEMORY_REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null) \
-      || die "claude-memory offsite preflight failed for $MEMORY_REMOTE (auth or reachability); rclone said: $mpre_err"
+    mpre_err=$(rclone lsd --max-depth 1 "$MEMORY_REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null)
+    mpre_rc=$?
+    if [ "$mpre_rc" -ne 0 ] && [ "$mpre_rc" -ne 3 ]; then
+      die "claude-memory offsite preflight failed for $MEMORY_REMOTE (auth or reachability); rclone said: $mpre_err"
+    fi
 
     mcopy_out=$(rclone copy "$MEMORY_SRC" "$MEMORY_REMOTE/current" \
           --backup-dir "$MEMORY_REMOTE/replaced/$STAMP" \
