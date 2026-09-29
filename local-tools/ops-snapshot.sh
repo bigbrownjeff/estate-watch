@@ -27,6 +27,15 @@ OPS_HOME="${OPS_HOME:-$HOME}"
 VAULT="${OPS_VAULT:-$HOME/ops-vault}"
 REMOTE="${OPS_REMOTE:-gdw-crypt:ops-vault}"
 MEMORY_REMOTE="${OPS_MEMORY_REMOTE:-gdw-crypt:data-vaults/claude-memory}"
+# Freshness marker for the ops-vault leg, kept OUTSIDE the git-tracked $VAULT tree on
+# purpose: a marker written inside $VAULT changes on every run (the timestamp), so git
+# always has something to commit and "ops-snapshot: no changes" can never print again.
+OPS_MARKER="${OPS_MARKER:-$HOME/data-vaults/ops-vault/last-ok.json}"
+# Same filter used by BOTH the push and the check for a given leg, from one variable, so
+# a .DS_Store the push already skips can never be reported "missing offsite" by the check
+# that is supposed to verify that exact push.
+MAIN_FILTER=(--exclude '.DS_Store')
+MEM_FILTER=(--exclude '.DS_Store')
 TS=$(date '+%Y-%m-%d %H:%M:%S')
 # Second-resolution: a DATE-only backup-dir key collides across every push in
 # the same day, so a second run's overwrite silently replaces the FIRST run's
@@ -37,12 +46,26 @@ FAILTASK="$HOME/.claude/bin/failtask"
 # OPS_NO_FAILTASK=1 suppresses the board-task filing only; the failure is
 # still printed and the script still exits nonzero. A test drives a
 # deliberate failure fixture and sets this so it never files a real task.
+#
+# $2 (default "ops") picks the board card's title/dedupe-key/detail. The claude-memory
+# leg is a separate lane on purpose: it must file its own card under its own dedupe key,
+# never reuse or overwrite the ops-vault leg's card, and it must never touch $OPS_MARKER,
+# which this function does not do either way.
 die() {
-  echo "ops-snapshot: FAILED — $1"
+  local msg="$1" lane="${2:-ops}" title dedupe detail
+  if [ "$lane" = "claude-memory" ]; then
+    title="claude-memory offsite failed: $msg"
+    dedupe="claude-memory-offsite-failed"
+    detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+  else
+    title="ops-snapshot failed: $msg"
+    dedupe="ops-snapshot-failed"
+    detail="The ops-layer backup did not complete at $TS. ~/.claude has no other backup, so every hour this stays broken is unprotected. Log: ~/.claude/failures/ops-snapshot.log"
+  fi
+  echo "ops-snapshot: FAILED — $msg"
   if [ -x "$FAILTASK" ] && [ "${OPS_NO_FAILTASK:-}" != "1" ]; then
-    "$FAILTASK" infra "ops-snapshot failed: $1" \
-      --detail "The ops-layer backup did not complete at $TS. ~/.claude has no other backup, so every hour this stays broken is unprotected. Log: ~/.claude/failures/ops-snapshot.log" \
-      --dedupe-key ops-snapshot-failed --severity error >/dev/null 2>&1
+    "$FAILTASK" infra "$title" --detail "$detail" \
+      --dedupe-key "$dedupe" --severity error >/dev/null 2>&1
   fi
   exit 1
 }
@@ -141,8 +164,14 @@ rsync -a --delete --include 'com.jeff*.plist' --exclude '*' \
 # file") instead of dereferencing or preserving it, which is exactly "regular
 # files only."
 if [ -e "$OPS_HOME/.local/bin" ]; then
-  rsync -a --no-links --delete --exclude '.DS_Store' \
-        "$OPS_HOME/.local/bin/" "$VAULT/home/local-bin/" || die "rsync $OPS_HOME/.local/bin"
+  # --no-links makes rsync print "skipping non-regular file" for every symlink it walks
+  # past (the "claude" symlink, by design). That notice is expected on every run, not an
+  # error, so it is filtered rather than left to read as one in the nightly log.
+  localbin_out=$(rsync -a --no-links --delete --exclude '.DS_Store' \
+        "$OPS_HOME/.local/bin/" "$VAULT/home/local-bin/" 2>&1)
+  localbin_rc=$?
+  printf '%s\n' "$localbin_out" | grep -v 'skipping non-regular file'
+  [ "$localbin_rc" -eq 0 ] || die "rsync $OPS_HOME/.local/bin"
 fi
 
 # ---- restore doc ---------------------------------------------------------------
@@ -169,12 +198,16 @@ offsite copy of their own until then.
 
 Deletions and overwrites are archived to `gdw-crypt:ops-vault/replaced/<stamp>` first, and
 every push is verified file by file (`rclone check --one-way --size-only`), not just
-counted. A `last-ok.json` at the root of this vault is written only after the push AND
-that verify both succeed; a missing or stale one is the alarm condition.
+counted. A `last-ok.json` (default `~/data-vaults/ops-vault/last-ok.json`, override with
+OPS_MARKER) is written only after the push AND that verify both succeed; it lives OUTSIDE
+this vault's git tree on purpose, so a quiet night still shows as "no changes" here. A
+missing or stale one is the alarm condition.
 
 A separate, much larger tree, `~/data-vaults/claude-memory` (memory-sync snapshots and
 adjudication records), is backed up by this same script but is NOT part of this vault or
-its git history. See "Restore the claude-memory archive" below.
+its git history. See "Restore the claude-memory archive" below. It has its own freshness
+marker at `~/data-vaults/claude-memory/last-ok.json` and its own failure card, separate
+from the ops-vault leg above.
 
 ## Roll back one bad edit
 
@@ -267,7 +300,7 @@ fi
 # until this change, so there was nowhere else to fix it.
 sync_out=$(rclone sync "$VAULT" "$REMOTE/current" \
       --backup-dir "$REMOTE/replaced/$STAMP" \
-      --exclude '.DS_Store' --transfers 4 --timeout 5m 2>&1)
+      "${MAIN_FILTER[@]}" --transfers 4 --timeout 5m 2>&1)
 sync_rc=$?
 printf '%s\n' "$sync_out" | tail -3
 [ "$sync_rc" -eq 0 ] || die "rclone sync to $REMOTE (rc=$sync_rc)"
@@ -276,18 +309,29 @@ echo "ops-snapshot: pushed to $REMOTE/current at $TS"
 # Verify per file, not "more than 100 objects": an object count only proves
 # SOME push landed on SOME past night, never that tonight's push landed and
 # matches. --one-way so files that exist offsite only under replaced/<stamp>
-# history are not reported as differences.
-check_out=$(rclone check --one-way --size-only "$VAULT" "$REMOTE/current" 2>&1)
+# history are not reported as differences. Same filter as the push above
+# (MAIN_FILTER), so a .DS_Store the push already skipped can never show up
+# here as a difference.
+check_out=$(rclone check --one-way --size-only "${MAIN_FILTER[@]}" "$VAULT" "$REMOTE/current" 2>&1)
 check_rc=$?
-printf '%s\n' "$check_out" | tail -5
+# "No common hash found" is rclone's expected NOTICE for --size-only, not a problem;
+# printed on every successful run otherwise, so it is filtered rather than read as an
+# error in the nightly log.
+printf '%s\n' "$check_out" | grep -v 'No common hash found' | tail -5
 [ "$check_rc" -eq 0 ] || die "rclone check found differences between $VAULT and $REMOTE/current (rc=$check_rc)"
 echo "ops-snapshot: verified $VAULT matches $REMOTE/current at $TS"
 
-# Freshness marker, written LAST and only once the push AND the per-file
-# verify have both succeeded. It lands inside $VAULT, so it rides along in
-# the next run's commit and push rather than needing its own write path.
-printf '{"last_ok":"%s","remote":"%s"}\n' "$(date -Iseconds)" "$REMOTE/current" > "$VAULT/last-ok.json" \
-  || die "cannot write last-ok.json"
+# Legacy line kept alongside the per-file one above: readers already grep
+# "verified N objects offsite" for the nightly result.
+remote_n=$(rclone size "$REMOTE/current" --json 2>/dev/null | sed -n 's/.*"count":\([0-9]*\).*/\1/p')
+echo "ops-snapshot: verified ${remote_n:-0} objects offsite at $TS"
+
+# Freshness marker, written LAST and only once the push AND the per-file verify have
+# both succeeded. It lives at $OPS_MARKER, OUTSIDE $VAULT's git tree, so it never gives
+# git something to commit on an otherwise-unchanged night.
+mkdir -p "$(dirname "$OPS_MARKER")" || die "cannot create $(dirname "$OPS_MARKER")"
+printf '{"last_ok":"%s","remote":"%s"}\n' "$(date -Iseconds)" "$REMOTE/current" > "$OPS_MARKER" \
+  || die "cannot write $OPS_MARKER"
 
 # ---- claude-memory offsite (separate leg, not part of this vault's git tree) ---
 # ~/data-vaults/claude-memory (about 1.4 GB of memory-sync snapshots and
@@ -297,29 +341,44 @@ printf '{"last_ok":"%s","remote":"%s"}\n' "$(date -Iseconds)" "$REMOTE/current" 
 # snapshot scripts own rotation for theirs.
 if [ "${OPS_MEMORY_VAULT_OFFSITE:-1}" = "1" ]; then
   MEMORY_SRC="$OPS_HOME/data-vaults/claude-memory"
+  # Its own marker, inside the very tree it backs up, so an OPS_HOME override in a test
+  # redirects this too without a separate env var: production resolves to the literal
+  # ~/data-vaults/claude-memory/last-ok.json.
+  MEM_MARKER="$MEMORY_SRC/last-ok.json"
   if [ -e "$MEMORY_SRC" ]; then
     mrtype=$(rclone config show "${MEMORY_REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
-    [ "$mrtype" = "crypt" ] || die "refusing claude-memory offsite: remote ${MEMORY_REMOTE%%:*} is type '${mrtype:-unknown}', not crypt"
+    [ "$mrtype" = "crypt" ] || die "refusing claude-memory offsite: remote ${MEMORY_REMOTE%%:*} is type '${mrtype:-unknown}', not crypt" "claude-memory"
 
     mpre_err=$(rclone lsd --max-depth 1 "$MEMORY_REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null)
     mpre_rc=$?
     if [ "$mpre_rc" -ne 0 ] && [ "$mpre_rc" -ne 3 ]; then
-      die "claude-memory offsite preflight failed for $MEMORY_REMOTE (auth or reachability); rclone said: $mpre_err"
+      die "claude-memory offsite preflight failed for $MEMORY_REMOTE (auth or reachability); rclone said: $mpre_err" "claude-memory"
     fi
 
     mcopy_out=$(rclone copy "$MEMORY_SRC" "$MEMORY_REMOTE/current" \
           --backup-dir "$MEMORY_REMOTE/replaced/$STAMP" \
-          --exclude '.DS_Store' --transfers 4 --timeout 30m 2>&1)
+          "${MEM_FILTER[@]}" --transfers 4 --timeout 30m 2>&1)
     mcopy_rc=$?
     printf '%s\n' "$mcopy_out" | tail -3
-    [ "$mcopy_rc" -eq 0 ] || die "rclone copy of claude-memory to $MEMORY_REMOTE (rc=$mcopy_rc)"
+    [ "$mcopy_rc" -eq 0 ] || die "rclone copy of claude-memory to $MEMORY_REMOTE (rc=$mcopy_rc)" "claude-memory"
     echo "ops-snapshot: pushed claude-memory to $MEMORY_REMOTE/current at $TS"
 
-    mcheck_out=$(rclone check --one-way --size-only "$MEMORY_SRC" "$MEMORY_REMOTE/current" 2>&1)
+    mcheck_out=$(rclone check --one-way --size-only "${MEM_FILTER[@]}" "$MEMORY_SRC" "$MEMORY_REMOTE/current" 2>&1)
     mcheck_rc=$?
-    printf '%s\n' "$mcheck_out" | tail -5
-    [ "$mcheck_rc" -eq 0 ] || die "rclone check found differences between $MEMORY_SRC and $MEMORY_REMOTE/current (rc=$mcheck_rc)"
+    printf '%s\n' "$mcheck_out" | grep -v 'No common hash found' | tail -5
+    [ "$mcheck_rc" -eq 0 ] || die "rclone check found differences between $MEMORY_SRC and $MEMORY_REMOTE/current (rc=$mcheck_rc)" "claude-memory"
     echo "ops-snapshot: verified $MEMORY_SRC matches $MEMORY_REMOTE/current at $TS"
+
+    # This leg's own freshness marker, written only after ITS push and check both
+    # succeed. Separate from $OPS_MARKER on purpose: a claude-memory failure must never
+    # touch the ops-vault leg's marker, and a good ops-vault run must never mask a stale
+    # or missing claude-memory offsite copy.
+    msize_json=$(rclone size "$MEMORY_SRC" --json 2>/dev/null)
+    mfiles=$(printf '%s' "$msize_json" | sed -n 's/.*"count":\([0-9]*\).*/\1/p')
+    mbytes=$(printf '%s' "$msize_json" | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')
+    printf '{"lane":"claude-memory","last_ok":"%s","files":%s,"bytes":%s,"offsite":true}\n' \
+      "$(date -Iseconds)" "${mfiles:-0}" "${mbytes:-0}" > "$MEM_MARKER" \
+      || die "cannot write $MEM_MARKER" "claude-memory"
   else
     echo "ops-snapshot: claude-memory offsite skipped, no $MEMORY_SRC"
   fi
