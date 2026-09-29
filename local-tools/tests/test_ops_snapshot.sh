@@ -145,9 +145,22 @@ assert_allowlisted() {  # $1 dir  $2 allowed  $3 label
 # T4: the same allowlist, asserted against the OFFSITE listing (rclone lsf),
 # not just the local vault -- a leak the local check catches could still
 # reach the remote if the two trees ever diverged.
+# T13 (P2 pin): a dropped rc or an empty listing must FAIL, not pass vacuously --
+# a listing command that errored, or a path that was silently wrong, proved
+# nothing about what is actually offsite.
 assert_allowlisted_remote() {  # $1 remote:path  $2 allowed  $3 label
   local remote="$1" allowed=" $2 " label="$3" bad_names="" name
-  local listing; listing=$(rclone lsf "$remote" 2>/dev/null)
+  local rc listing
+  listing=$(rclone lsf "$remote" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    bad "$label: rclone lsf failed (rc=$rc) against $remote, offsite listing not verified"
+    return
+  fi
+  if [ -z "$(printf '%s' "$listing" | tr -d '[:space:]')" ]; then
+    bad "$label: rclone lsf returned nothing for $remote, offsite listing not verified"
+    return
+  fi
   while IFS= read -r entry; do
     [ -z "$entry" ] && continue
     name="${entry%/}"
@@ -222,11 +235,13 @@ restore_subject() {  # $1 label
 echo "== 1. first full run =="
 VAULT1="$WORK/vault1"
 MARK1="$WORK/vault1.marker.json"
-# F2 writes its own marker at $FAKE_HOME/data-vaults/claude-memory/last-ok.json,
-# INSIDE the fixture home tree, on every successful memory leg -- excluded here
-# on purpose, since its own content changing every run is correct behaviour,
-# not a script that reads only. Everything else in the home tree must be inert.
-MEM_MARKER_EXCLUDE="$FAKE_HOME/data-vaults/claude-memory/last-ok.json"
+# F7 writes the claude-memory offsite marker at its OWN default path,
+# $FAKE_HOME/data-vaults/claude-memory-offsite/last-ok.json -- a sibling of, not
+# inside, $FAKE_HOME/data-vaults/claude-memory (which F7 leaves untouched; T10
+# below pins that). Excluded here on purpose, since its own content changing
+# every run is correct behaviour, not a script that reads only. Everything else
+# in the home tree must be inert.
+MEM_MARKER_EXCLUDE="$FAKE_HOME/data-vaults/claude-memory-offsite/last-ok.json"
 home_before=$(snapshot_home "$FAKE_HOME" "$MEM_MARKER_EXCLUDE")
 OUT1=$(OPS_VAULT="$VAULT1" OPS_REMOTE="test-crypt:ops-vault" \
        OPS_MEMORY_REMOTE="test-crypt:claude-memory" OPS_MARKER="$MARK1" run_snap)
@@ -284,6 +299,25 @@ echo "$MEMLS1" | grep -q '"Path":"mem1.bin"' \
 [ -s "$MARK1" ] && ok "OPS_MARKER written after a clean run" || bad "OPS_MARKER missing after a clean run"
 assert_allowlisted_remote "test-crypt:ops-vault/current/claude" "$CLAUDE_ALLOWED" "offsite claude/ top level"
 assert_allowlisted_remote "test-crypt:ops-vault/current/home"   "$HOME_ALLOWED"   "offsite home/ top level"
+
+echo "== T12 (F4 + F5a/F5b pin): legacy count line has the right N; a clean run's output is quiet =="
+# Computed right here, while run 1's push to test-crypt:ops-vault/current is still the
+# latest state of that remote path -- later tests push MORE changes to the same remote,
+# so a fresh 'rclone size' taken near the end of this suite would no longer match what
+# $OUT1 actually reported at the time.
+N1_REPORTED=$(echo "$OUT1" | sed -n 's/.*verified \([0-9][0-9]*\) objects offsite at.*/\1/p' | head -1)
+N1_ACTUAL=$(rclone size test-crypt:ops-vault/current --json 2>/dev/null \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('count',''))" 2>/dev/null)
+check "T12 (F4): legacy 'verified N objects offsite' line reports the actual remote object count" "$N1_REPORTED" "$N1_ACTUAL"
+echo "$OUT1" | grep -q "No common hash found" \
+  && bad "T12 (F5a): 'No common hash found' NOTICE leaked into a clean run's output" \
+  || ok "T12 (F5a): no 'No common hash found' NOTICE in a clean run's output"
+echo "$OUT1" | grep -q "skipping non-regular file" \
+  && bad "T12 (F5b): 'skipping non-regular file' notice leaked into a clean run's output" \
+  || ok "T12 (F5b): no 'skipping non-regular file' notice in a clean run's output"
+echo "$OUT1" | grep -qx "" \
+  && bad "T12 (F8): a clean run's output contains a blank line" \
+  || ok "T12 (F8): a clean run's output has no blank lines"
 
 echo "== T2 (F1 pin): a Finder .DS_Store dropped directly in the vault and in the claude-memory source =="
 touch "$VAULT1/claude/handoffs/.DS_Store"
@@ -378,7 +412,12 @@ else
 fi
 
 echo "== T5a (F2 pin): a failed claude-memory leg leaves the ops marker of that run intact and writes no claude-memory marker =="
-MEM_MARKER_PATH="$FAKE_HOME/data-vaults/claude-memory/last-ok.json"
+# F7 moved this leg's own marker to its own directory (claude-memory-offsite/,
+# never inside claude-memory/ itself, and OPS_MEM_MARKER is unset here so this
+# is the default path) -- pinning the old memory-sync-shaped path here would
+# make this check vacuously pass (always "__absent__") regardless of whether a
+# refused leg wrote a marker at the path it actually uses.
+MEM_MARKER_PATH="$FAKE_HOME/data-vaults/claude-memory-offsite/last-ok.json"
 MEM_MARKER_BEFORE=$(cat "$MEM_MARKER_PATH" 2>/dev/null || echo "__absent__")
 VAULTF2="$WORK/vault-f2"
 MARKF2="$WORK/vault-f2.marker.json"
@@ -483,7 +522,7 @@ sync_out=$(rclone sync "$VAULT" "$REMOTE/current" \
       --backup-dir "$REMOTE/replaced/$STAMP" \
       "${MAIN_FILTER[@]}" --transfers 4 --timeout 5m 2>&1)
 sync_rc=$?
-printf '%s\n' "$sync_out" | tail -3
+[ -n "$sync_out" ] && printf '%s\n' "$sync_out" | tail -3
 [ "$sync_rc" -eq 0 ] || die "rclone sync to $REMOTE (rc=$sync_rc)"
 BLOCK
 cat > "$MUTNEW" <<'BLOCK'
@@ -538,6 +577,9 @@ RCR=$?
 check "REAL (restored) script: failed push exits nonzero" "$RCR" "1"
 [ -s "$MARKR" ] && bad "REAL script wrote OPS_MARKER despite a failed push" \
                  || ok "REAL script correctly wrote no OPS_MARKER on a failed push"
+echo "$OUTR" | grep -q "ops-snapshot: pushed to" \
+  && bad "REAL script printed 'pushed to' despite a failed push" \
+  || ok "REAL script correctly printed no 'pushed to' line on a failed push"
 chmod -R 755 "$BADBACKING1" "$BADBACKING2" 2>/dev/null
 
 echo "== b. MUTATION-PROVE: .local/bin symlink handling =="
@@ -727,15 +769,21 @@ mkdir -p "$DRYM_HOME/data-vaults/claude-memory" "$DRYM_HOME/Library/LaunchAgents
 echo "dry mem version A" > "$DRYM_HOME/data-vaults/claude-memory/m.bin"
 VAULTDRYMEM="$WORK/vault-dryrun-mem"
 MARKDRYMEM="$WORK/vault-dryrun-mem.marker.json"
+MEMMARKDRYMEM="$WORK/vault-dryrun-mem.memmarker.json"
 OPS_HOME="$DRYM_HOME" OPS_VAULT="$VAULTDRYMEM" OPS_REMOTE="test-crypt:ops-vault-dry-mem" \
-  OPS_MEMORY_REMOTE="test-crypt:claude-memory-dry" OPS_MARKER="$MARKDRYMEM" run_snap >/dev/null
-echo "dry mem version B (never actually uploaded under dry-run)" > "$DRYM_HOME/data-vaults/claude-memory/m.bin"
-MEMMARK_BEFORE=$(cat "$DRYM_HOME/data-vaults/claude-memory/last-ok.json" 2>/dev/null)
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-dry" OPS_MARKER="$MARKDRYMEM" OPS_MEM_MARKER="$MEMMARKDRYMEM" run_snap >/dev/null
+# A NEW file, never an edit to an existing one: hand-verified that RCLONE_DRY_RUN=true can let
+# an `rclone copy` of a CHANGED EXISTING file transfer for real (a quirk this suite's earlier
+# form hit by accident, via F7's now-removed in-tree marker rewrite). A brand-new, never-before-
+# pushed file gives a clean local-only diff regardless of that quirk -- confirmed by hand: the
+# dry-run copy transfers nothing for a new file, and the per-file check below still catches it.
+echo "dry mem version B (a NEW file, never actually uploaded under dry-run)" > "$DRYM_HOME/data-vaults/claude-memory/m2.bin"
+MEMMARK_BEFORE=$(cat "$MEMMARKDRYMEM" 2>/dev/null)
 OUTDRYMEM=$(OPS_HOME="$DRYM_HOME" OPS_VAULT="$VAULTDRYMEM" OPS_REMOTE="test-crypt:ops-vault-dry-mem" \
-  OPS_MEMORY_REMOTE="test-crypt:claude-memory-dry" OPS_MARKER="$MARKDRYMEM" RCLONE_DRY_RUN=true run_snap)
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-dry" OPS_MARKER="$MARKDRYMEM" OPS_MEM_MARKER="$MEMMARKDRYMEM" RCLONE_DRY_RUN=true run_snap)
 RCDRYMEM=$?
-check "REAL script: claude-memory dry-run-masked drift makes the run exit nonzero" "$RCDRYMEM" "1"
-MEMMARK_AFTER=$(cat "$DRYM_HOME/data-vaults/claude-memory/last-ok.json" 2>/dev/null)
+check "REAL script: claude-memory dry-run-masked drift (new file) makes the run exit nonzero" "$RCDRYMEM" "1"
+MEMMARK_AFTER=$(cat "$MEMMARKDRYMEM" 2>/dev/null)
 check "REAL script: claude-memory marker unchanged by a dry-run-masked drift" "$MEMMARK_AFTER" "$MEMMARK_BEFORE"
 
 BADBACKINGM="$WORK/badbacking-mem"; mkdir -p "$BADBACKINGM"
@@ -900,14 +948,239 @@ else
   bad "could not apply M14 mutation (block not found exactly once); script left untouched"
 fi
 
+echo "== T8 (P1 behaviour): claude-memory copy exit status gates everything downstream of it =="
+BADBACKINGT8="$WORK/badbacking-t8"; mkdir -p "$BADBACKINGT8"
+chmod -R 555 "$BADBACKINGT8"
+PWT8=$(rclone obscure t8-pw-1); PWT8_2=$(rclone obscure t8-pw-2)
+cat >> "$RCONF" <<CFG
+
+[bad-crypt-t8]
+type = crypt
+remote = $BADBACKINGT8
+password = $PWT8
+password2 = $PWT8_2
+CFG
+VAULTT8="$WORK/vault-t8"
+MARKT8="$WORK/vault-t8.marker.json"
+MEMMARKT8="$WORK/vault-t8.memmarker.json"
+OUTT8=$(OPS_VAULT="$VAULTT8" OPS_REMOTE="test-crypt:ops-vault-t8" \
+  OPS_MEMORY_REMOTE="bad-crypt-t8:sub" OPS_MARKER="$MARKT8" OPS_MEM_MARKER="$MEMMARKT8" run_snap)
+RCT8=$?
+check "T8: REAL script -- failed claude-memory copy (unwritable backing for a new file) exits the whole run nonzero" "$RCT8" "1"
+[ -s "$MARKT8" ] && ok "T8: ops-vault leg still succeeded and wrote its own marker before the memory leg failed" \
+                  || bad "T8: ops marker missing even though the ops leg should have succeeded first"
+[ -s "$MEMMARKT8" ] && bad "T8: claude-memory marker WAS written despite a failed copy" \
+                      || ok "T8: no claude-memory marker written after a failed copy"
+echo "$OUTT8" | grep -q "ops-snapshot: pushed claude-memory to" \
+  && bad "T8: run printed 'pushed claude-memory to' despite a failed copy" \
+  || ok "T8: run correctly printed no 'pushed claude-memory to' line"
+chmod -R 755 "$BADBACKINGT8" 2>/dev/null
+
+echo "== T9 (F2a/F2b pin): a failing leg files exactly one board task, keyed and titled per lane =="
+FT_HOME="$WORK/home-failtask"
+mkdir -p "$FT_HOME/.claude/bin" "$FT_HOME/data-vaults/claude-memory" "$FT_HOME/Library/LaunchAgents"
+echo "mem" > "$FT_HOME/data-vaults/claude-memory/m.bin"
+FT_LOG="$WORK/failtask.log"
+cat > "$FT_HOME/.claude/bin/failtask" <<STUB
+#!/bin/bash
+printf '%s\n' "FAILTASK \$*" >> "$FT_LOG"
+exit 0
+STUB
+chmod +x "$FT_HOME/.claude/bin/failtask"
+
+rm -f "$FT_LOG"
+VAULTT9A="$WORK/vault-t9a"
+MARKT9A="$WORK/vault-t9a.marker.json"
+HOME="$FT_HOME" OPS_HOME="$FT_HOME" RCLONE_CONFIG="$RCONF" \
+  OPS_VAULT="$VAULTT9A" OPS_REMOTE="test-crypt:ops-vault-t9a" \
+  OPS_MEMORY_REMOTE="test-plain:$PLAINBACKING" OPS_MARKER="$MARKT9A" \
+  /bin/bash "$SUBJECT" >/dev/null 2>&1
+FTCOUNT_A=$(grep -c "^FAILTASK " "$FT_LOG" 2>/dev/null); FTCOUNT_A="${FTCOUNT_A:-0}"
+check "T9: failing claude-memory leg files exactly one failtask record" "$FTCOUNT_A" "1"
+grep -q -- "--dedupe-key claude-memory-offsite-failed" "$FT_LOG" 2>/dev/null \
+  && ok "T9: claude-memory failure uses its own dedupe key" \
+  || bad "T9: claude-memory-offsite-failed dedupe key missing: $(cat "$FT_LOG" 2>/dev/null)"
+grep -q "claude-memory offsite failed" "$FT_LOG" 2>/dev/null \
+  && ok "T9: claude-memory failure title names claude-memory" \
+  || bad "T9: title does not name claude-memory: $(cat "$FT_LOG" 2>/dev/null)"
+
+rm -f "$FT_LOG"
+VAULTT9B="$WORK/vault-t9b"
+MARKT9B="$WORK/vault-t9b.marker.json"
+HOME="$FT_HOME" OPS_HOME="$FT_HOME" RCLONE_CONFIG="$RCONF" \
+  OPS_VAULT="$VAULTT9B" OPS_REMOTE="test-plain:$PLAINBACKING" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory" OPS_MARKER="$MARKT9B" \
+  /bin/bash "$SUBJECT" >/dev/null 2>&1
+FTCOUNT_B=$(grep -c "^FAILTASK " "$FT_LOG" 2>/dev/null); FTCOUNT_B="${FTCOUNT_B:-0}"
+check "T9: failing ops-vault leg files exactly one failtask record" "$FTCOUNT_B" "1"
+grep -q -- "--dedupe-key ops-snapshot-failed" "$FT_LOG" 2>/dev/null \
+  && ok "T9: ops-vault failure uses its own dedupe key" \
+  || bad "T9: ops-snapshot-failed dedupe key missing: $(cat "$FT_LOG" 2>/dev/null)"
+grep -q "ops-snapshot failed" "$FT_LOG" 2>/dev/null \
+  && ok "T9: ops-vault failure title names ops-snapshot" \
+  || bad "T9: title does not name ops-snapshot: $(cat "$FT_LOG" 2>/dev/null)"
+
+echo "== T10 (F2e + F7 pin): claude-memory marker content, and memory-sync's own last-ok.json is left untouched =="
+T10_HOME="$WORK/home-t10"
+mkdir -p "$T10_HOME/.claude/handoffs" "$T10_HOME/data-vaults/claude-memory" "$T10_HOME/Library/LaunchAgents"
+echo "note" > "$T10_HOME/.claude/handoffs/n.md"
+echo "t10 memory content" > "$T10_HOME/data-vaults/claude-memory/mem-t10.bin"
+# Pre-seed the exact schema memory-sync itself writes (local-tools/memory-sync:605:
+# {"snapshot":..., "ts":...}) at the top level of the source -- F7 requires this file be
+# treated as ordinary data to back up, never read or written as this leg's own marker.
+MEMSYNC_MARKER="$T10_HOME/data-vaults/claude-memory/last-ok.json"
+printf '{"snapshot":"pre-existing","ts":"2026-09-28T01:00:00"}' > "$MEMSYNC_MARKER"
+MEMSYNC_MARKER_BEFORE=$(cat "$MEMSYNC_MARKER")
+VAULTT10="$WORK/vault-t10"
+MARKT10="$WORK/vault-t10.marker.json"
+OUTT10=$(OPS_HOME="$T10_HOME" OPS_VAULT="$VAULTT10" OPS_REMOTE="test-crypt:ops-vault-t10" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t10" OPS_MARKER="$MARKT10" run_snap)
+RCT10=$?
+check "T10: run with a pre-existing memory-sync marker exits 0" "$RCT10" "0"
+MEMSYNC_MARKER_AFTER=$(cat "$MEMSYNC_MARKER" 2>/dev/null)
+check "T10 (F7): memory-sync's own last-ok.json is byte-identical after the run" "$MEMSYNC_MARKER_AFTER" "$MEMSYNC_MARKER_BEFORE"
+DEFAULT_MEM_MARKER="$T10_HOME/data-vaults/claude-memory-offsite/last-ok.json"
+[ -s "$DEFAULT_MEM_MARKER" ] && ok "T10 (F7): offsite marker landed at the new default path (OPS_MEM_MARKER unset)" \
+                              || bad "T10 (F7): no marker found at the new default path $DEFAULT_MEM_MARKER"
+MARKER_LANE=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('lane',''))" "$DEFAULT_MEM_MARKER" 2>/dev/null)
+check "T10 (F2e): marker lane is claude-memory" "$MARKER_LANE" "claude-memory"
+MARKER_OFFSITE=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('offsite'))" "$DEFAULT_MEM_MARKER" 2>/dev/null)
+check "T10 (F2e): marker offsite field is true" "$MARKER_OFFSITE" "True"
+MARKER_FILES=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('files'))" "$DEFAULT_MEM_MARKER" 2>/dev/null)
+FIXTURE_FILES=$(find "$T10_HOME/data-vaults/claude-memory" -type f | wc -l | tr -d ' ')
+check "T10 (F2e): marker files count matches the fixture" "$MARKER_FILES" "$FIXTURE_FILES"
+MARKER_BYTES=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bytes'))" "$DEFAULT_MEM_MARKER" 2>/dev/null)
+FIXTURE_BYTES=$(find "$T10_HOME/data-vaults/claude-memory" -type f -exec stat -f%z {} \; | awk '{s+=$1} END{print s+0}')
+check "T10 (F2e): marker bytes count matches the fixture" "$MARKER_BYTES" "$FIXTURE_BYTES"
+
+echo "== T11 (F3a pin): OPS_MARKER default path lands outside the vault tree, under \$HOME =="
+VAULTT11="$WORK/vault-t11"
+DEFAULT_OPS_MARKER="$FAKE_HOME/data-vaults/ops-vault/last-ok.json"
+[ -e "$DEFAULT_OPS_MARKER" ] && bad "T11 setup: default marker path already exists before any run" \
+                              || ok "T11 setup: default marker path absent before any run"
+OUTT11A=$(OPS_VAULT="$VAULTT11" OPS_REMOTE="test-crypt:ops-vault-t11" \
+  OPS_MEMORY_VAULT_OFFSITE=0 OPS_MEMORY_REMOTE="test-crypt:claude-memory" run_snap)
+RCT11A=$?
+check "T11: first run with no OPS_MARKER override exits 0" "$RCT11A" "0"
+[ -s "$DEFAULT_OPS_MARKER" ] && ok "T11 (F3a): marker landed at the default path (\$HOME/data-vaults/ops-vault/last-ok.json)" \
+                              || bad "T11 (F3a): no marker at the default path $DEFAULT_OPS_MARKER"
+[ -e "$VAULTT11/data-vaults" ] && bad "T11: default marker path leaked INTO the vault tree" \
+                                || ok "T11: default marker path is not inside the vault tree"
+OUTT11B=$(OPS_VAULT="$VAULTT11" OPS_REMOTE="test-crypt:ops-vault-t11" \
+  OPS_MEMORY_VAULT_OFFSITE=0 OPS_MEMORY_REMOTE="test-crypt:claude-memory" run_snap)
+RCT11B=$?
+check "T11: second unchanged run exits 0" "$RCT11B" "0"
+echo "$OUTT11B" | grep -q "ops-snapshot: no changes at" \
+  && ok "T11: unchanged second run prints 'no changes' with the default OPS_MARKER" \
+  || bad "T11: unchanged second run did not print 'no changes': $OUTT11B"
+
+echo "== T13: assert_allowlisted_remote itself fails on a broken or empty listing, never a vacuous ok =="
+T13_RC_OUT=$( ( assert_allowlisted_remote "test-crypt:nonexistent-t13-remote/current" "$CLAUDE_ALLOWED" "T13 rc-fail probe" ) 2>&1 )
+echo "$T13_RC_OUT" | grep -q "^  FAIL" \
+  && ok "T13: assert_allowlisted_remote fails (not a vacuous ok) when the listing command errors" \
+  || bad "T13: assert_allowlisted_remote did not fail on a broken listing: $T13_RC_OUT"
+T13_EMPTYDIR="$WORK/vault-t13-empty"; mkdir -p "$T13_EMPTYDIR"
+T13_EMPTY_OUT=$( ( assert_allowlisted_remote "test-plain:$T13_EMPTYDIR" "$CLAUDE_ALLOWED" "T13 empty-listing probe" ) 2>&1 )
+echo "$T13_EMPTY_OUT" | grep -q "^  FAIL" \
+  && ok "T13: assert_allowlisted_remote fails (not a vacuous ok) when the listing is empty" \
+  || bad "T13: assert_allowlisted_remote did not fail on an empty listing: $T13_EMPTY_OUT"
+
+echo "== T14a: MUTATION-PROVE T8 -- claude-memory copy gate replaced with a no-op ([ mcopy_rc -eq 0 ] || true, M05b) =="
+MUTOLD_M05B="$WORK/mut-m05b-old.txt"; MUTNEW_M05B="$WORK/mut-m05b-new.txt"
+printf '%s' '[ "$mcopy_rc" -eq 0 ] || die "rclone copy of claude-memory to $MEMORY_REMOTE (rc=$mcopy_rc)" "claude-memory"' > "$MUTOLD_M05B"
+printf '%s' '[ "$mcopy_rc" -eq 0 ] || true' > "$MUTNEW_M05B"
+BADBACKINGT14="$WORK/badbacking-t14"; mkdir -p "$BADBACKINGT14"
+chmod -R 555 "$BADBACKINGT14"
+PWT14=$(rclone obscure t14-pw-1); PWT14_2=$(rclone obscure t14-pw-2)
+cat >> "$RCONF" <<CFG
+
+[bad-crypt-t14]
+type = crypt
+remote = $BADBACKINGT14
+password = $PWT14
+password2 = $PWT14_2
+CFG
+if mutate_block "$MUTOLD_M05B" "$MUTNEW_M05B" "$SUBJECT"; then
+  ok "mutation applied: claude-memory copy gate replaced with a no-op (M05b)"
+  VAULTT14A="$WORK/vault-t14a"
+  MARKT14A="$WORK/vault-t14a.marker.json"
+  MEMMARKT14A="$WORK/vault-t14a.memmarker.json"
+  OUTT14A=$(OPS_VAULT="$VAULTT14A" OPS_REMOTE="test-crypt:ops-vault-t14a" \
+    OPS_MEMORY_REMOTE="bad-crypt-t14:sub" OPS_MARKER="$MARKT14A" OPS_MEM_MARKER="$MEMMARKT14A" run_snap)
+  RCT14A=$?
+  if echo "$OUTT14A" | grep -q "ops-snapshot: pushed claude-memory to"; then
+    ok "MUTATION CONFIRMED (red, T8/M05b): with the copy gate defeated, a genuinely failed claude-memory copy is falsely reported as pushed -- $(echo "$OUTT14A" | grep 'pushed claude-memory to')"
+  else
+    bad "MUTATION did not reproduce the T8 defect (rc=$RCT14A): $OUTT14A"
+  fi
+  restore_subject "T14a (M05b)"
+  VAULTT14G="$WORK/vault-t14g"
+  MARKT14G="$WORK/vault-t14g.marker.json"
+  MEMMARKT14G="$WORK/vault-t14g.memmarker.json"
+  OUTT14G=$(OPS_VAULT="$VAULTT14G" OPS_REMOTE="test-crypt:ops-vault-t14g" \
+    OPS_MEMORY_REMOTE="bad-crypt-t14:sub" OPS_MARKER="$MARKT14G" OPS_MEM_MARKER="$MEMMARKT14G" run_snap)
+  RCT14G=$?
+  if [ "$RCT14G" -eq 1 ] && ! echo "$OUTT14G" | grep -q "ops-snapshot: pushed claude-memory to"; then
+    ok "restored script (green, T8): the same failing remote correctly exits 1 with no 'pushed claude-memory to' line -- $(echo "$OUTT14G" | grep 'rclone copy of claude-memory' | head -1)"
+  else
+    bad "restored script did not behave correctly on the same failing remote (rc=$RCT14G): $OUTT14G"
+  fi
+  chmod -R 755 "$BADBACKINGT14" 2>/dev/null
+else
+  bad "could not apply T14a mutation (block not found exactly once); script left untouched"
+fi
+
+echo "== T14b: MUTATION-PROVE T9 -- claude-memory failure lane branch disabled (F2a/F2b) =="
+MUTOLD_T14B="$WORK/mut-t14b-old.txt"; MUTNEW_T14B="$WORK/mut-t14b-new.txt"
+cat > "$MUTOLD_T14B" <<'BLOCK'
+  if [ "$lane" = "claude-memory" ]; then
+    title="claude-memory offsite failed: $msg"
+    dedupe="claude-memory-offsite-failed"
+    detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+  else
+BLOCK
+cat > "$MUTNEW_T14B" <<'BLOCK'
+  if [ "$lane" = "__never__" ]; then
+    title="claude-memory offsite failed: $msg"
+    dedupe="claude-memory-offsite-failed"
+    detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+  else
+BLOCK
+if mutate_block "$MUTOLD_T14B" "$MUTNEW_T14B" "$SUBJECT"; then
+  ok "mutation applied: claude-memory failure lane branch disabled (F2a/F2b)"
+  rm -f "$FT_LOG"
+  HOME="$FT_HOME" OPS_HOME="$FT_HOME" RCLONE_CONFIG="$RCONF" \
+    OPS_VAULT="$WORK/vault-t14b" OPS_REMOTE="test-crypt:ops-vault-t14b" \
+    OPS_MEMORY_REMOTE="test-plain:$PLAINBACKING" OPS_MARKER="$WORK/vault-t14b.marker.json" \
+    /bin/bash "$SUBJECT" >/dev/null 2>&1
+  if grep -q -- "--dedupe-key claude-memory-offsite-failed" "$FT_LOG" 2>/dev/null; then
+    bad "MUTATION did not reproduce the defect -- claude-memory dedupe key still filed correctly"
+  else
+    ok "MUTATION CONFIRMED (red, T9/F2a-F2b): with the lane branch disabled, a failing claude-memory leg files under the WRONG key -- $(cat "$FT_LOG" 2>/dev/null)"
+  fi
+  restore_subject "T14b (lane branch)"
+  rm -f "$FT_LOG"
+  HOME="$FT_HOME" OPS_HOME="$FT_HOME" RCLONE_CONFIG="$RCONF" \
+    OPS_VAULT="$WORK/vault-t14b-green" OPS_REMOTE="test-crypt:ops-vault-t14b-green" \
+    OPS_MEMORY_REMOTE="test-plain:$PLAINBACKING" OPS_MARKER="$WORK/vault-t14b-green.marker.json" \
+    /bin/bash "$SUBJECT" >/dev/null 2>&1
+  if grep -q -- "--dedupe-key claude-memory-offsite-failed" "$FT_LOG" 2>/dev/null; then
+    ok "restored script (green, T9): failing claude-memory leg files correctly under claude-memory-offsite-failed"
+  else
+    bad "restored script did not file the correct dedupe key: $(cat "$FT_LOG" 2>/dev/null)"
+  fi
+else
+  bad "could not apply T14b mutation (block not found exactly once); script left untouched"
+fi
+
 echo "== final sanity: restored subject still bash -n clean, byte-identical to backup, and the tracked $SCRIPT was never touched =="
 /bin/bash -n "$SUBJECT" && ok "restored subject: bash -n clean" || bad "restored subject: bash -n FAILED"
 diff -q "$BACKUP" "$SUBJECT" >/dev/null 2>&1 && ok "restored subject is byte-identical to the pre-mutation backup" || bad "restored subject differs from backup"
 SCRIPT_HASH_AFTER=$(shasum "$SCRIPT" | cut -d' ' -f1)
 check "T1: the tracked $SCRIPT was never written to by this suite" "$SCRIPT_HASH_AFTER" "$SCRIPT_HASH_BEFORE"
 
-chmod -R 755 "$BADBACKINGPF" "$BADBACKINGPFM" 2>/dev/null
-rm -rf "$BADBACKING1" "$BADBACKING2" "$BADBACKINGM" "$BADBACKINGPF" "$BADBACKINGPFM" 2>/dev/null
+chmod -R 755 "$BADBACKINGPF" "$BADBACKINGPFM" "$BADBACKINGT8" "$BADBACKINGT14" 2>/dev/null
+rm -rf "$BADBACKING1" "$BADBACKING2" "$BADBACKINGM" "$BADBACKINGPF" "$BADBACKINGPFM" "$BADBACKINGT8" "$BADBACKINGT14" 2>/dev/null
 
 echo
 echo "SUMMARY: $pass passed, $fail failed"
