@@ -45,6 +45,7 @@ rows=(
   "local-tools/tests/test_interpreter_lint.py|$HOME/.claude/bin/tests/test_interpreter_lint.py|0755"
   "local-tools/deliverables-sweep.py|$HOME/.claude/bin/deliverables-sweep.py|0755"
   "local-tools/ops-snapshot.sh|$HOME/.claude/bin/ops-snapshot.sh|0755"
+  "local-tools/tests/test_ops_snapshot.sh|$HOME/.claude/bin/tests/test_ops_snapshot.sh|0755"
 )
 
 case "$mode" in
