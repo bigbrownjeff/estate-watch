@@ -88,9 +88,10 @@ jobs:
           check_url "brand-safety-demo"    "https://brand-safety-demo.pages.dev/" public
           check_url "cc-compliance-demo"   "https://cc-compliance-demo.pages.dev/" public
           check_url "camh-subgroup-demo"   "https://camh-subgroup-demo.pages.dev/" public
-          # Tunnel-backed surfaces: origin is the laptop, so cloudflared dying takes these
-          # down while the edge sites stay green. Lantern is the one with real users.
-          check_url "tunnel:lantern-watch" "https://watch.lantern.family/" reachable
+          # Tunnel-backed surfaces: origin is the Mac, so cloudflared dying takes these
+          # down while the edge sites stay green. watch.lantern.family is not probed:
+          # the household lab was taken down on 2026-09-29 (Jeff's ruling) and the
+          # kids' walls live on alpha.lantern.family, which is an edge site.
           check_url "tunnel:atlas"         "https://atlas.lantern.family/" reachable
           check_url "tunnel:notes"         "https://notes.jeffpinto.com/" reachable
           check_url "tunnel:bluecamel"     "https://bluecamelconsulting.com/" public "" "Blue Camel"
