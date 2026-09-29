@@ -170,7 +170,8 @@ if [ -e "$OPS_HOME/.local/bin" ]; then
   localbin_out=$(rsync -a --no-links --delete --exclude '.DS_Store' \
         "$OPS_HOME/.local/bin/" "$VAULT/home/local-bin/" 2>&1)
   localbin_rc=$?
-  printf '%s\n' "$localbin_out" | grep -v 'skipping non-regular file'
+  localbin_filtered=$(printf '%s\n' "$localbin_out" | grep -v 'skipping non-regular file')
+  [ -n "$localbin_filtered" ] && printf '%s\n' "$localbin_filtered"
   [ "$localbin_rc" -eq 0 ] || die "rsync $OPS_HOME/.local/bin"
 fi
 
@@ -324,7 +325,7 @@ check_rc=$?
 # NOTICE for --size-only, not a problem, so it is filtered even on failure.
 if [ "$check_rc" -ne 0 ]; then
   check_filtered=$(printf '%s\n' "$check_out" | grep -v 'No common hash found')
-  [ -n "$check_filtered" ] && printf '%s\n' "$check_filtered" | tail -5
+  [ -n "$check_filtered" ] && printf '%s\n' "$check_filtered" | grep -E 'ERROR|NOTICE' | tail -20
 fi
 [ "$check_rc" -eq 0 ] || die "rclone check found differences between $VAULT and $REMOTE/current (rc=$check_rc)"
 echo "ops-snapshot: verified $VAULT matches $REMOTE/current at $TS"
@@ -386,7 +387,7 @@ if [ "${OPS_MEMORY_VAULT_OFFSITE:-1}" = "1" ]; then
     mcheck_rc=$?
     if [ "$mcheck_rc" -ne 0 ]; then
       mcheck_filtered=$(printf '%s\n' "$mcheck_out" | grep -v 'No common hash found')
-      [ -n "$mcheck_filtered" ] && printf '%s\n' "$mcheck_filtered" | tail -5
+      [ -n "$mcheck_filtered" ] && printf '%s\n' "$mcheck_filtered" | grep -E 'ERROR|NOTICE' | tail -20
     fi
     [ "$mcheck_rc" -eq 0 ] || die "rclone check found differences between $MEMORY_SRC and $MEMORY_REMOTE/current (rc=$mcheck_rc)" "claude-memory"
     echo "ops-snapshot: verified $MEMORY_SRC matches $MEMORY_REMOTE/current at $TS"
@@ -395,7 +396,7 @@ if [ "${OPS_MEMORY_VAULT_OFFSITE:-1}" = "1" ]; then
     # succeed. Separate from $OPS_MARKER on purpose: a claude-memory failure must never
     # touch the ops-vault leg's marker, and a good ops-vault run must never mask a stale
     # or missing claude-memory offsite copy.
-    msize_json=$(rclone size "$MEMORY_SRC" --json 2>/dev/null)
+    msize_json=$(rclone size ${MEM_FILTER[@]+"${MEM_FILTER[@]}"} "$MEMORY_SRC" --json 2>/dev/null)
     mfiles=$(printf '%s' "$msize_json" | sed -n 's/.*"count":\([0-9]*\).*/\1/p')
     mbytes=$(printf '%s' "$msize_json" | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')
     mkdir -p "$(dirname "$MEM_MARKER")" || die "cannot create $(dirname "$MEM_MARKER")" "claude-memory"
