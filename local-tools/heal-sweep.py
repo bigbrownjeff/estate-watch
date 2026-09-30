@@ -122,6 +122,13 @@ BACKUP_LANES = {
     "photo-atlas-snapshot-failed": "~/data-vaults/photo-atlas/last-ok.json",
     "lantern-data-snapshot-failed": "~/lantern-data-vault/last-ok.json",
     "rally-d1-export-failed": "~/data-vaults/rally/last-ok.json",
+    # ops-snapshot's four legs (local-tools/ops-snapshot.sh). Each writes its marker
+    # last, after its own push and check; the three offsite-field lanes prove offsite
+    # inline, the ops-vault marker has no such field and uses the launchd fallback.
+    "ops-snapshot-failed": "~/data-vaults/ops-vault/last-ok.json",
+    "claude-memory-offsite-failed": "~/data-vaults/claude-memory-offsite/last-ok.json",
+    "estate-secrets-offsite-failed": "~/data-vaults/estate-secrets-offsite/last-ok.json",
+    "audio-notes-offsite-failed": "~/data-vaults/audio-notes-offsite/last-ok.json",
 }
 
 
@@ -262,6 +269,7 @@ def check_launchd(label, filed_ts):
 # music-atlas, photo-atlas, rally) prove it inline and need no fallback.
 BACKUP_LAUNCHD_FALLBACK = {
     "lantern-data-snapshot-failed": "com.jeffpinto.lantern-data-snapshot",
+    "ops-snapshot-failed": "com.jeffpinto.ops-snapshot",
 }
 
 

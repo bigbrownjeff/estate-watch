@@ -194,7 +194,10 @@ run_snap() {  # env vars set by caller (OPS_VAULT, OPS_REMOTE, OPS_MEMORY_REMOTE
   # OPS_MARKER ($HOME/data-vaults/ops-vault/last-ok.json) can never resolve
   # into the real $HOME. OPS_HOME defaults to the fixture too, unless a
   # caller overrides it (T6's missing-directory fixtures).
+  # The secrets and audio legs stay off unless a test turns them on, so the
+  # older tests keep exercising only the legs they were written for.
   OPS_HOME="${OPS_HOME:-$FAKE_HOME}" HOME="$FAKE_HOME" RCLONE_CONFIG="$RCONF" OPS_NO_FAILTASK=1 \
+    OPS_SECRETS_OFFSITE="${OPS_SECRETS_OFFSITE:-0}" OPS_AUDIO_OFFSITE="${OPS_AUDIO_OFFSITE:-0}" \
     /bin/bash "$SUBJECT" "$@" 2>&1
 }
 
@@ -828,7 +831,7 @@ echo "== T3 (M04 pin): MUTATION-PROVE claude-memory crypt-type check removed =="
 MUTOLD_M04="$WORK/mut-m04-old.txt"; MUTNEW_M04="$WORK/mut-m04-new.txt"
 cat > "$MUTOLD_M04" <<'BLOCK'
     mrtype=$(rclone config show "${MEMORY_REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
-    [ "$mrtype" = "crypt" ] || die "refusing claude-memory offsite: remote ${MEMORY_REMOTE%%:*} is type '${mrtype:-unknown}', not crypt" "claude-memory"
+    [ "$mrtype" = "crypt" ] || { fail_leg "refusing claude-memory offsite: remote ${MEMORY_REMOTE%%:*} is type '${mrtype:-unknown}', not crypt" "claude-memory"; return 1; }
 BLOCK
 cat > "$MUTNEW_M04" <<'BLOCK'
     mrtype=$(rclone config show "${MEMORY_REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
@@ -917,7 +920,7 @@ cat > "$MUTOLD_M14" <<'BLOCK'
     mpre_err=$(rclone lsd --max-depth 1 "$MEMORY_REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null)
     mpre_rc=$?
     if [ "$mpre_rc" -ne 0 ] && [ "$mpre_rc" -ne 3 ]; then
-      die "claude-memory offsite preflight failed for $MEMORY_REMOTE (auth or reachability); rclone said: $mpre_err" "claude-memory"
+      { fail_leg "claude-memory offsite preflight failed for $MEMORY_REMOTE (auth or reachability); rclone said: $mpre_err" "claude-memory"; return 1; }
     fi
 BLOCK
 cat > "$MUTNEW_M14" <<'BLOCK'
@@ -992,6 +995,7 @@ rm -f "$FT_LOG"
 VAULTT9A="$WORK/vault-t9a"
 MARKT9A="$WORK/vault-t9a.marker.json"
 HOME="$FT_HOME" OPS_HOME="$FT_HOME" RCLONE_CONFIG="$RCONF" \
+  OPS_SECRETS_OFFSITE=0 OPS_AUDIO_OFFSITE=0 \
   OPS_VAULT="$VAULTT9A" OPS_REMOTE="test-crypt:ops-vault-t9a" \
   OPS_MEMORY_REMOTE="test-plain:$PLAINBACKING" OPS_MARKER="$MARKT9A" \
   /bin/bash "$SUBJECT" >/dev/null 2>&1
@@ -1008,6 +1012,7 @@ rm -f "$FT_LOG"
 VAULTT9B="$WORK/vault-t9b"
 MARKT9B="$WORK/vault-t9b.marker.json"
 HOME="$FT_HOME" OPS_HOME="$FT_HOME" RCLONE_CONFIG="$RCONF" \
+  OPS_SECRETS_OFFSITE=0 OPS_AUDIO_OFFSITE=0 \
   OPS_VAULT="$VAULTT9B" OPS_REMOTE="test-plain:$PLAINBACKING" \
   OPS_MEMORY_REMOTE="test-crypt:claude-memory" OPS_MARKER="$MARKT9B" \
   /bin/bash "$SUBJECT" >/dev/null 2>&1
@@ -1087,7 +1092,7 @@ echo "$T13_EMPTY_OUT" | grep -q "^  FAIL" \
 
 echo "== T14a: MUTATION-PROVE T8 -- claude-memory copy gate replaced with a no-op ([ mcopy_rc -eq 0 ] || true, M05b) =="
 MUTOLD_M05B="$WORK/mut-m05b-old.txt"; MUTNEW_M05B="$WORK/mut-m05b-new.txt"
-printf '%s' '[ "$mcopy_rc" -eq 0 ] || die "rclone copy of claude-memory to $MEMORY_REMOTE (rc=$mcopy_rc)" "claude-memory"' > "$MUTOLD_M05B"
+printf '%s' '[ "$mcopy_rc" -eq 0 ] || { fail_leg "rclone copy of claude-memory to $MEMORY_REMOTE (rc=$mcopy_rc)" "claude-memory"; return 1; }' > "$MUTOLD_M05B"
 printf '%s' '[ "$mcopy_rc" -eq 0 ] || true' > "$MUTNEW_M05B"
 BADBACKINGT14="$WORK/badbacking-t14"; mkdir -p "$BADBACKINGT14"
 chmod -R 555 "$BADBACKINGT14"
@@ -1131,20 +1136,25 @@ else
 fi
 
 echo "== T14b: MUTATION-PROVE T9 -- claude-memory failure lane branch disabled (F2a/F2b) =="
+# a4ecf28 moved fail_leg's dispatch from if/else into a case statement (only the dispatch
+# moved, per that commit's own note; claude-memory's hard-stop behavior via die() did not).
+# The mutation target below is the new case-arm equivalent of the old if/else block: rename
+# the "claude-memory)" case label so it can never match, which falls the lane through to the
+# "*)" default arm -- same defect this test always proved, just at its new address.
 MUTOLD_T14B="$WORK/mut-t14b-old.txt"; MUTNEW_T14B="$WORK/mut-t14b-new.txt"
 cat > "$MUTOLD_T14B" <<'BLOCK'
-  if [ "$lane" = "claude-memory" ]; then
-    title="claude-memory offsite failed: $msg"
-    dedupe="claude-memory-offsite-failed"
-    detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
-  else
+    claude-memory)
+      title="claude-memory offsite failed: $msg"
+      dedupe="claude-memory-offsite-failed"
+      detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+      ;;
 BLOCK
 cat > "$MUTNEW_T14B" <<'BLOCK'
-  if [ "$lane" = "__never__" ]; then
-    title="claude-memory offsite failed: $msg"
-    dedupe="claude-memory-offsite-failed"
-    detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
-  else
+    __never__)
+      title="claude-memory offsite failed: $msg"
+      dedupe="claude-memory-offsite-failed"
+      detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+      ;;
 BLOCK
 if mutate_block "$MUTOLD_T14B" "$MUTNEW_T14B" "$SUBJECT"; then
   ok "mutation applied: claude-memory failure lane branch disabled (F2a/F2b)"
@@ -1173,14 +1183,642 @@ else
   bad "could not apply T14b mutation (block not found exactly once); script left untouched"
 fi
 
+echo "== T15: estate-secrets leg green -- fixed paths + discovered .env/.dev.vars land offsite, _wt/ and mattel-engagement excluded, marker mode 600, staging dir cleaned, nothing new in \$OPS_VAULT =="
+mkdir -p "$FAKE_HOME/.config/rclone" "$FAKE_HOME/.wrangler/config" \
+  "$FAKE_HOME/Library/Preferences/.wrangler/config" \
+  "$FAKE_HOME/Projects/app" "$FAKE_HOME/Projects/_wt/x" "$FAKE_HOME/Projects/mattel-engagement"
+echo "not-a-real-rclone-conf"     > "$FAKE_HOME/.config/rclone/rclone.conf"
+echo "not-a-real-wrangler-toml"   > "$FAKE_HOME/.wrangler/config/default.toml"
+echo "not-a-real-wrangler-toml-2" > "$FAKE_HOME/Library/Preferences/.wrangler/config/default.toml"
+echo "API_KEY=notreal"  > "$FAKE_HOME/Projects/app/.env"
+echo "API_KEY=notreal2" > "$FAKE_HOME/Projects/_wt/x/.env"
+echo "API_KEY=notreal3" > "$FAKE_HOME/Projects/mattel-engagement/.env"
+
+VAULTT15="$WORK/vault-t15"
+MARKT15="$WORK/vault-t15.marker.json"
+SECMARKT15="$WORK/vault-t15.secrets-marker.json"
+OUTT15=$(OPS_VAULT="$VAULTT15" OPS_REMOTE="test-crypt:ops-vault-t15" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t15" OPS_MARKER="$MARKT15" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t15" \
+  OPS_SECRETS_MARKER="$SECMARKT15" run_snap)
+RCT15=$?
+check "T15: secrets-green run exits 0" "$RCT15" "0"
+if [ "$RCT15" -ne 0 ]; then echo "$OUTT15"; fi
+
+SECLIST_T15=$(rclone lsf -R "test-crypt:estate-secrets-t15/current" 2>/dev/null)
+for expect in ".claude/secrets/apikey.txt" ".cloudflared/cert.pem" ".config/rclone/rclone.conf" \
+              ".wrangler/config/default.toml" "Library/Preferences/.wrangler/config/default.toml" \
+              "Projects/app/.env"; do
+  if printf '%s\n' "$SECLIST_T15" | grep -qF "$expect"; then
+    ok "T15: $expect present offsite"
+  else
+    bad "T15: $expect MISSING offsite -- listing was: $SECLIST_T15"
+  fi
+done
+if printf '%s\n' "$SECLIST_T15" | grep -qF "_wt/x/.env"; then
+  bad "T15: worktree .env leaked offsite (Projects/_wt/ must be excluded)"
+else
+  ok "T15: worktree .env correctly excluded"
+fi
+if printf '%s\n' "$SECLIST_T15" | grep -q "mattel-engagement"; then
+  bad "T15: mattel-engagement .env leaked offsite (that repo must be pruned entirely)"
+else
+  ok "T15: mattel-engagement .env correctly excluded"
+fi
+
+if [ -f "$SECMARKT15" ]; then
+  ok "T15: secrets marker written"
+  MODE_T15=$(stat -f '%Lp' "$SECMARKT15" 2>/dev/null)
+  check "T15: secrets marker mode 600" "$MODE_T15" "600"
+else
+  bad "T15: secrets marker NOT written"
+fi
+
+STAGE_LEFT_T15=$(find "$FAKE_HOME" -maxdepth 1 -name '.ops-snapshot-secrets.*' 2>/dev/null)
+if [ -z "$STAGE_LEFT_T15" ]; then
+  ok "T15: no leftover secrets staging dir under \$OPS_HOME"
+else
+  bad "T15: leftover secrets staging dir(s) under \$OPS_HOME: $STAGE_LEFT_T15"
+fi
+
+assert_allowlisted "$VAULTT15/claude" "$CLAUDE_ALLOWED" "T15 vault/claude (nothing new in \$OPS_VAULT)"
+assert_allowlisted "$VAULTT15/home"   "$HOME_ALLOWED"   "T15 vault/home (nothing new in \$OPS_VAULT)"
+
+echo "== T16: audio-notes leg green -- files land, models/ excluded, marker carries files+bytes, copy (not sync) never deletes a remote-only file on a later run =="
+mkdir -p "$FAKE_HOME/.claude/audio-notes/models" "$FAKE_HOME/.claude/audio-notes/call-2026-09-20"
+echo "audio chunk 1" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-20/chunk1.wav"
+echo "audio chunk 2" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-20/chunk2.wav"
+echo "big whisper model, must never leave the machine" > "$FAKE_HOME/.claude/audio-notes/models/ggml-base.bin"
+
+VAULTT16="$WORK/vault-t16"
+MARKT16="$WORK/vault-t16.marker.json"
+AUDMARKT16="$WORK/vault-t16.audio-marker.json"
+OUTT16=$(OPS_VAULT="$VAULTT16" OPS_REMOTE="test-crypt:ops-vault-t16" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t16" OPS_MARKER="$MARKT16" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t16" \
+  OPS_AUDIO_MARKER="$AUDMARKT16" run_snap)
+RCT16=$?
+check "T16: audio-green first run exits 0" "$RCT16" "0"
+if [ "$RCT16" -ne 0 ]; then echo "$OUTT16"; fi
+
+AUDLIST_T16=$(rclone lsf -R "test-crypt:audio-notes-t16/current" 2>/dev/null)
+for expect in "call-2026-09-20/chunk1.wav" "call-2026-09-20/chunk2.wav"; do
+  if printf '%s\n' "$AUDLIST_T16" | grep -qF "$expect"; then
+    ok "T16: $expect present offsite"
+  else
+    bad "T16: $expect MISSING offsite -- listing was: $AUDLIST_T16"
+  fi
+done
+if printf '%s\n' "$AUDLIST_T16" | grep -q "models/"; then
+  bad "T16: models/ leaked offsite (must be excluded)"
+else
+  ok "T16: models/ correctly excluded offsite"
+fi
+
+if [ -f "$AUDMARKT16" ]; then
+  ok "T16: audio marker written"
+  FILES_T16=$(sed -n 's/.*"files":\([0-9]*\).*/\1/p' "$AUDMARKT16")
+  BYTES_T16=$(sed -n 's/.*"bytes":\([0-9]*\).*/\1/p' "$AUDMARKT16")
+  if [ -n "$FILES_T16" ] && [ "$FILES_T16" -gt 0 ] 2>/dev/null; then
+    ok "T16: audio marker files count > 0 ($FILES_T16)"
+  else
+    bad "T16: audio marker files count missing or zero: $(cat "$AUDMARKT16" 2>/dev/null)"
+  fi
+  if [ -n "$BYTES_T16" ] && [ "$BYTES_T16" -gt 0 ] 2>/dev/null; then
+    ok "T16: audio marker bytes count > 0 ($BYTES_T16)"
+  else
+    bad "T16: audio marker bytes count missing or zero: $(cat "$AUDMARKT16" 2>/dev/null)"
+  fi
+else
+  bad "T16: audio marker NOT written"
+fi
+
+echo "  -- copy-not-sync: delete one local file, run again against the same remote, prove it survives offsite --"
+rm -f "$FAKE_HOME/.claude/audio-notes/call-2026-09-20/chunk1.wav"
+VAULTT16B="$WORK/vault-t16b"
+MARKT16B="$WORK/vault-t16b.marker.json"
+AUDMARKT16B="$WORK/vault-t16b.audio-marker.json"
+OUTT16B=$(OPS_VAULT="$VAULTT16B" OPS_REMOTE="test-crypt:ops-vault-t16b" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t16b" OPS_MARKER="$MARKT16B" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t16" \
+  OPS_AUDIO_MARKER="$AUDMARKT16B" run_snap)
+RCT16B=$?
+check "T16: audio-green second run (after local delete) exits 0" "$RCT16B" "0"
+AUDLIST_T16B=$(rclone lsf -R "test-crypt:audio-notes-t16/current" 2>/dev/null)
+if printf '%s\n' "$AUDLIST_T16B" | grep -qF "call-2026-09-20/chunk1.wav"; then
+  ok "T16: copy (not sync) left the locally-deleted file on the remote"
+else
+  bad "T16: chunk1.wav vanished offsite after a local delete -- the audio leg is syncing (deleting), not copying"
+fi
+
+echo "== T17: independent legs -- estate-secrets refused (non-crypt remote) must not block audio-notes succeeding =="
+mkdir -p "$FAKE_HOME/.claude/audio-notes/call-2026-09-21"
+echo "audio chunk t17" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-21/chunk1.wav"
+
+VAULTT17="$WORK/vault-t17"
+MARKT17="$WORK/vault-t17.marker.json"
+SECMARKT17="$WORK/vault-t17.secrets-marker.json"
+AUDMARKT17="$WORK/vault-t17.audio-marker.json"
+OUTT17=$(OPS_VAULT="$VAULTT17" OPS_REMOTE="test-crypt:ops-vault-t17" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t17" OPS_MARKER="$MARKT17" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-plain:$PLAINBACKING/estate-secrets-t17" \
+  OPS_SECRETS_MARKER="$SECMARKT17" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t17" \
+  OPS_AUDIO_MARKER="$AUDMARKT17" run_snap)
+RCT17=$?
+check "T17: overall run exits 1 (secrets leg refused)" "$RCT17" "1"
+if echo "$OUTT17" | grep -q "refusing offsite: remote test-plain is type 'local', not crypt"; then
+  ok "T17: estate-secrets leg correctly refused the non-crypt remote"
+else
+  bad "T17: expected secrets crypt-refusal message not seen: $OUTT17"
+fi
+if [ -f "$SECMARKT17" ]; then
+  bad "T17: secrets marker WAS written despite the leg failing"
+else
+  ok "T17: secrets marker correctly not written"
+fi
+if [ -f "$AUDMARKT17" ]; then
+  ok "T17: audio marker written even though the secrets leg failed (legs are independent)"
+else
+  bad "T17: audio marker NOT written -- the secrets failure incorrectly blocked the audio leg"
+fi
+AUDLIST_T17=$(rclone lsf -R "test-crypt:audio-notes-t17/current" 2>/dev/null)
+if printf '%s\n' "$AUDLIST_T17" | grep -qF "call-2026-09-21/chunk1.wav"; then
+  ok "T17: audio files pushed offsite despite the secrets leg failing"
+else
+  bad "T17: audio files missing offsite -- listing was: $AUDLIST_T17"
+fi
+
+echo "== T18: audio-notes leg refuses a non-crypt remote =="
+mkdir -p "$FAKE_HOME/.claude/audio-notes/call-2026-09-22"
+echo "audio chunk t18" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-22/chunk1.wav"
+
+VAULTT18="$WORK/vault-t18"
+MARKT18="$WORK/vault-t18.marker.json"
+AUDMARKT18="$WORK/vault-t18.audio-marker.json"
+OUTT18=$(OPS_VAULT="$VAULTT18" OPS_REMOTE="test-crypt:ops-vault-t18" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t18" OPS_MARKER="$MARKT18" \
+  OPS_SECRETS_OFFSITE=0 \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-plain:$PLAINBACKING/audio-notes-t18" \
+  OPS_AUDIO_MARKER="$AUDMARKT18" run_snap)
+RCT18=$?
+check "T18: exits 1 when the audio remote is refused" "$RCT18" "1"
+if echo "$OUTT18" | grep -q "refusing audio-notes offsite: remote test-plain is type 'local', not crypt"; then
+  ok "T18: audio-notes leg correctly refused the non-crypt remote"
+else
+  bad "T18: expected audio crypt-refusal message not seen: $OUTT18"
+fi
+if [ -f "$AUDMARKT18" ]; then
+  bad "T18: audio marker WAS written despite the leg being refused"
+else
+  ok "T18: audio marker correctly not written"
+fi
+
+echo "== T19: estate-secrets refuses to sync an empty stage; remote and marker are left untouched =="
+mkdir -p "$FAKE_HOME/Projects/seedapp"
+echo "API_KEY=seedT19" > "$FAKE_HOME/Projects/seedapp/.env"
+
+VAULTT19="$WORK/vault-t19"
+MARKT19="$WORK/vault-t19.marker.json"
+SECMARKT19="$WORK/vault-t19.secrets-marker.json"
+OUTT19SEED=$(OPS_VAULT="$VAULTT19" OPS_REMOTE="test-crypt:ops-vault-t19" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t19" OPS_MARKER="$MARKT19" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t19" \
+  OPS_SECRETS_MARKER="$SECMARKT19" run_snap)
+RCT19SEED=$?
+check "T19 seed: green secrets run exits 0" "$RCT19SEED" "0"
+if [ "$RCT19SEED" -ne 0 ]; then echo "$OUTT19SEED"; fi
+
+SEEDLIST_T19=$(rclone lsf -R "test-crypt:estate-secrets-t19/current" 2>/dev/null)
+printf '%s\n' "$SEEDLIST_T19" | grep -qF "Projects/seedapp/.env" \
+  && ok "T19 seed: seeded file present offsite before the empty-stage attempt" \
+  || bad "T19 seed: seeded file missing offsite -- listing was: $SEEDLIST_T19"
+
+SEC_MARKER_CONTENT_BEFORE=$(cat "$SECMARKT19" 2>/dev/null)
+SEC_MARKER_MTIME_BEFORE=$(stat -f '%m' "$SECMARKT19" 2>/dev/null)
+sleep 1
+
+EMPTY_HOME_T19="$WORK/home-t19-empty-secrets"
+mkdir -p "$EMPTY_HOME_T19/.claude/handoffs" "$EMPTY_HOME_T19/Library/LaunchAgents"
+echo "note" > "$EMPTY_HOME_T19/.claude/handoffs/note.md"
+# no .claude/secrets, .cloudflared, .config/rclone, .wrangler, or Projects/*/.env at all
+
+OUTT19EMPTY=$(OPS_HOME="$EMPTY_HOME_T19" OPS_VAULT="$VAULTT19" OPS_REMOTE="test-crypt:ops-vault-t19" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t19" OPS_MARKER="$MARKT19" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t19" \
+  OPS_SECRETS_MARKER="$SECMARKT19" run_snap)
+RCT19EMPTY=$?
+check "T19: empty-stage run exits 1" "$RCT19EMPTY" "1"
+echo "$OUTT19EMPTY" | grep -q "staged 0 secret files" \
+  && ok "T19: 'staged 0 secret files' message printed" \
+  || bad "T19: expected 'staged 0 secret files' message not seen: $OUTT19EMPTY"
+
+SEEDLIST_T19B=$(rclone lsf -R "test-crypt:estate-secrets-t19/current" 2>/dev/null)
+printf '%s\n' "$SEEDLIST_T19B" | grep -qF "Projects/seedapp/.env" \
+  && ok "T19: remote current/ still lists the seeded file after the failed empty-stage run" \
+  || bad "T19: seeded file vanished from the remote after the failed empty-stage run -- listing was: $SEEDLIST_T19B"
+
+SEC_MARKER_CONTENT_AFTER=$(cat "$SECMARKT19" 2>/dev/null)
+SEC_MARKER_MTIME_AFTER=$(stat -f '%m' "$SECMARKT19" 2>/dev/null)
+check "T19: secrets marker content unchanged after the failed empty-stage run" "$SEC_MARKER_CONTENT_AFTER" "$SEC_MARKER_CONTENT_BEFORE"
+check "T19: secrets marker mtime unchanged after the failed empty-stage run" "$SEC_MARKER_MTIME_AFTER" "$SEC_MARKER_MTIME_BEFORE"
+
+echo "== T20: estate-secrets excludes any .env under a path containing /mattel-, not just the top-level prune =="
+mkdir -p "$FAKE_HOME/Projects/other/mattel-engagement" "$FAKE_HOME/Projects/mattel-packaging"
+echo "API_KEY=nestedmattel"   > "$FAKE_HOME/Projects/other/mattel-engagement/.env"
+echo "API_KEY=toplevelmattel" > "$FAKE_HOME/Projects/mattel-packaging/.env"
+# Projects/app/.env already exists (from T15) and is the normal control case.
+
+VAULTT20="$WORK/vault-t20"
+MARKT20="$WORK/vault-t20.marker.json"
+SECMARKT20="$WORK/vault-t20.secrets-marker.json"
+OUTT20=$(OPS_VAULT="$VAULTT20" OPS_REMOTE="test-crypt:ops-vault-t20" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t20" OPS_MARKER="$MARKT20" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t20" \
+  OPS_SECRETS_MARKER="$SECMARKT20" run_snap)
+RCT20=$?
+check "T20: secrets run exits 0" "$RCT20" "0"
+if [ "$RCT20" -ne 0 ]; then echo "$OUTT20"; fi
+
+SECLIST_T20=$(rclone lsf -R "test-crypt:estate-secrets-t20/current" 2>/dev/null)
+printf '%s\n' "$SECLIST_T20" | grep -qF "Projects/app/.env" \
+  && ok "T20: normal Projects/app/.env present offsite" \
+  || bad "T20: normal Projects/app/.env MISSING offsite -- listing was: $SECLIST_T20"
+printf '%s\n' "$SECLIST_T20" | grep -q "mattel-engagement" \
+  && bad "T20: nested Projects/other/mattel-engagement/.env leaked offsite" \
+  || ok "T20: nested Projects/other/mattel-engagement/.env correctly excluded"
+printf '%s\n' "$SECLIST_T20" | grep -q "mattel-packaging" \
+  && bad "T20: Projects/mattel-packaging/.env leaked offsite" \
+  || ok "T20: Projects/mattel-packaging/.env correctly excluded"
+
+echo "== T21: ops-vault leg refusing a non-crypt remote does not skip estate-secrets/audio-notes (they already ran) =="
+mkdir -p "$FAKE_HOME/Projects/t21app" "$FAKE_HOME/.claude/audio-notes/call-2026-09-23"
+echo "API_KEY=t21" > "$FAKE_HOME/Projects/t21app/.env"
+echo "audio chunk t21" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-23/chunk1.wav"
+
+SECMARKT21="$WORK/vault-t21.secrets-marker.json"
+AUDMARKT21="$WORK/vault-t21.audio-marker.json"
+OUTT21=$(OPS_VAULT="$WORK/vault-t21" OPS_REMOTE="test-plain:$PLAINBACKING/ops-vault-t21" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t21" OPS_MARKER="$WORK/vault-t21.marker.json" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t21" OPS_SECRETS_MARKER="$SECMARKT21" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t21" OPS_AUDIO_MARKER="$AUDMARKT21" run_snap)
+RCT21=$?
+check "T21: overall run exits 1 (ops-vault leg refused)" "$RCT21" "1"
+echo "$OUTT21" | grep -q "refusing offsite: remote test-plain is type 'local', not crypt" \
+  && ok "T21: ops-vault leg correctly refused the non-crypt remote" \
+  || bad "T21: expected ops-vault crypt-refusal message not seen: $OUTT21"
+
+[ -f "$SECMARKT21" ] && ok "T21: estate-secrets marker written despite ops-vault refusing" \
+  || bad "T21: estate-secrets marker NOT written -- ops-vault failure incorrectly blocked an earlier leg"
+[ -f "$AUDMARKT21" ] && ok "T21: audio-notes marker written despite ops-vault refusing" \
+  || bad "T21: audio-notes marker NOT written -- ops-vault failure incorrectly blocked an earlier leg"
+
+SECLIST_T21=$(rclone lsf -R "test-crypt:estate-secrets-t21/current" 2>/dev/null)
+printf '%s\n' "$SECLIST_T21" | grep -qF "Projects/t21app/.env" \
+  && ok "T21: estate-secrets file present offsite despite ops-vault refusing" \
+  || bad "T21: estate-secrets file missing offsite -- listing was: $SECLIST_T21"
+
+AUDLIST_T21=$(rclone lsf -R "test-crypt:audio-notes-t21/current" 2>/dev/null)
+printf '%s\n' "$AUDLIST_T21" | grep -qF "call-2026-09-23/chunk1.wav" \
+  && ok "T21: audio-notes file present offsite despite ops-vault refusing" \
+  || bad "T21: audio-notes file missing offsite -- listing was: $AUDLIST_T21"
+
+echo "== T22: claude-memory leg refusing a non-crypt remote is not fatal to earlier legs but still fails the run =="
+mkdir -p "$FAKE_HOME/Projects/t22app" "$FAKE_HOME/.claude/audio-notes/call-2026-09-24"
+echo "API_KEY=t22" > "$FAKE_HOME/Projects/t22app/.env"
+echo "audio chunk t22" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-24/chunk1.wav"
+
+MARKT22="$WORK/vault-t22.marker.json"
+SECMARKT22="$WORK/vault-t22.secrets-marker.json"
+AUDMARKT22="$WORK/vault-t22.audio-marker.json"
+MEMMARKT22="$WORK/vault-t22.memory-marker.json"
+OUTT22=$(OPS_VAULT="$WORK/vault-t22" OPS_REMOTE="test-crypt:ops-vault-t22" \
+  OPS_MEMORY_REMOTE="test-plain:$PLAINBACKING/claude-memory-t22" OPS_MEM_MARKER="$MEMMARKT22" \
+  OPS_MARKER="$MARKT22" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t22" OPS_SECRETS_MARKER="$SECMARKT22" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t22" OPS_AUDIO_MARKER="$AUDMARKT22" run_snap)
+RCT22=$?
+check "T22: overall run exits 1 (claude-memory leg refused)" "$RCT22" "1"
+echo "$OUTT22" | grep -q "refusing claude-memory offsite: remote test-plain is type 'local', not crypt" \
+  && ok "T22: claude-memory leg correctly refused the non-crypt remote" \
+  || bad "T22: expected claude-memory crypt-refusal message not seen: $OUTT22"
+
+[ -f "$MARKT22" ] && ok "T22: ops-vault marker written despite claude-memory leg failing" \
+  || bad "T22: ops-vault marker NOT written -- claude-memory failure incorrectly blocked ops-vault"
+[ -f "$SECMARKT22" ] && ok "T22: estate-secrets marker written despite claude-memory leg failing" \
+  || bad "T22: estate-secrets marker NOT written"
+[ -f "$AUDMARKT22" ] && ok "T22: audio-notes marker written despite claude-memory leg failing" \
+  || bad "T22: audio-notes marker NOT written"
+[ -f "$MEMMARKT22" ] && bad "T22: claude-memory marker WAS written despite the leg being refused" \
+  || ok "T22: claude-memory marker correctly not written"
+
+echo "== T23: MUTATION-PROVE M-S1 -- estate-secrets sync rc gate defeated (ssync_rc check forced false) =="
+MUTOLD_S1="$WORK/mut-s1-old.txt"; MUTNEW_S1="$WORK/mut-s1-new.txt"
+cat > "$MUTOLD_S1" <<'BLOCK'
+  if [ "$ssync_rc" -ne 0 ]; then
+    fail_leg "rclone sync to $OPS_SECRETS_REMOTE (rc=$ssync_rc)" "estate-secrets"
+    return 1
+  fi
+BLOCK
+cat > "$MUTNEW_S1" <<'BLOCK'
+  if [ "$ssync_rc" -ne 0 ] && false; then
+    fail_leg "rclone sync to $OPS_SECRETS_REMOTE (rc=$ssync_rc)" "estate-secrets"
+    return 1
+  fi
+BLOCK
+BADBACKINGT23="$WORK/badbacking-t23"; mkdir -p "$BADBACKINGT23"
+chmod -R 555 "$BADBACKINGT23"
+PWT23=$(rclone obscure t23-pw-1); PWT23_2=$(rclone obscure t23-pw-2)
+cat >> "$RCONF" <<CFG
+
+[bad-crypt-t23]
+type = crypt
+remote = $BADBACKINGT23
+password = $PWT23
+password2 = $PWT23_2
+CFG
+if mutate_block "$MUTOLD_S1" "$MUTNEW_S1" "$SUBJECT"; then
+  ok "mutation applied: estate-secrets sync rc gate defeated (M-S1)"
+  OUTT23=$(OPS_VAULT="$WORK/vault-t23" OPS_REMOTE="test-crypt:ops-vault-t23" \
+    OPS_MEMORY_REMOTE="test-crypt:claude-memory-t23" OPS_MARKER="$WORK/vault-t23.marker.json" \
+    OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="bad-crypt-t23:sub" OPS_SECRETS_MARKER="$WORK/vault-t23.secrets-marker.json" \
+    run_snap)
+  if echo "$OUTT23" | grep -q "ops-snapshot: pushed estate-secrets to"; then
+    ok "MUTATION CONFIRMED (red, M-S1): with the sync rc gate defeated, a genuinely failed secrets sync (read-only backing dir) is falsely reported as pushed -- $(echo "$OUTT23" | grep 'pushed estate-secrets to')"
+  else
+    bad "MUTATION did not reproduce the M-S1 defect: $OUTT23"
+  fi
+  restore_subject "T23 (M-S1)"
+  OUTT23G=$(OPS_VAULT="$WORK/vault-t23g" OPS_REMOTE="test-crypt:ops-vault-t23g" \
+    OPS_MEMORY_REMOTE="test-crypt:claude-memory-t23g" OPS_MARKER="$WORK/vault-t23g.marker.json" \
+    OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="bad-crypt-t23:sub" OPS_SECRETS_MARKER="$WORK/vault-t23g.secrets-marker.json" \
+    run_snap)
+  if ! echo "$OUTT23G" | grep -q "ops-snapshot: pushed estate-secrets to"; then
+    ok "restored script (green, M-S1): the same failing remote no longer prints the false 'pushed' line -- $(echo "$OUTT23G" | grep 'rclone sync to' | head -1)"
+  else
+    bad "restored script still printed the false 'pushed' line on the same failing remote: $OUTT23G"
+  fi
+  chmod -R 755 "$BADBACKINGT23" 2>/dev/null
+else
+  bad "could not apply T23 mutation (block not found exactly once); script left untouched"
+fi
+
+echo "== T24: MUTATION-PROVE M-S2 -- estate-secrets cryptcheck verify block removed entirely =="
+# A diverging-content-same-size fixture that fools rclone sync's modtime/size skip
+# logic while cryptcheck alone would catch it was not buildable in bounded turns
+# (see report). Escape hatch per brief: prove the verify line actually runs by
+# showing its 'verified estate-secrets matches' message disappears when the whole
+# cryptcheck block is removed, even though the run still exits 0 (sync + marker
+# write are untouched by this mutation).
+MUTOLD_S2="$WORK/mut-s2-old.txt"; MUTNEW_S2="$WORK/mut-s2-new.txt"
+cat > "$MUTOLD_S2" <<'BLOCK'
+  local scheck_out scheck_rc scheck_filtered
+  scheck_out=$(rclone cryptcheck --one-way "${SECRETS_FILTER[@]}" "$stage" "$OPS_SECRETS_REMOTE/current" 2>&1)
+  scheck_rc=$?
+  if [ "$scheck_rc" -ne 0 ]; then
+    scheck_filtered=$(printf '%s\n' "$scheck_out" | grep -v 'No common hash found')
+    [ -n "$scheck_filtered" ] && printf '%s\n' "$scheck_filtered" | grep -E 'ERROR|NOTICE' | tail -20
+    fail_leg "rclone check found differences between staged secrets and $OPS_SECRETS_REMOTE/current (rc=$scheck_rc)" "estate-secrets"
+    return 1
+  fi
+  echo "ops-snapshot: verified estate-secrets matches $OPS_SECRETS_REMOTE/current at $TS"
+BLOCK
+printf '' > "$MUTNEW_S2"
+if mutate_block "$MUTOLD_S2" "$MUTNEW_S2" "$SUBJECT"; then
+  ok "mutation applied: estate-secrets cryptcheck verify block removed (M-S2)"
+  OUTT24=$(OPS_VAULT="$WORK/vault-t24" OPS_REMOTE="test-crypt:ops-vault-t24" \
+    OPS_MEMORY_REMOTE="test-crypt:claude-memory-t24" OPS_MARKER="$WORK/vault-t24.marker.json" \
+    OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t24" OPS_SECRETS_MARKER="$WORK/vault-t24.secrets-marker.json" \
+    run_snap)
+  RCT24=$?
+  if [ "$RCT24" -eq 0 ] && ! echo "$OUTT24" | grep -q "ops-snapshot: verified estate-secrets matches"; then
+    ok "MUTATION CONFIRMED (red, M-S2): with the verify block removed, the run still exits 0 and never prints 'verified estate-secrets matches'"
+  else
+    bad "MUTATION did not reproduce the M-S2 defect (rc=$RCT24): $OUTT24"
+  fi
+  restore_subject "T24 (M-S2)"
+else
+  bad "could not apply T24 mutation (block not found exactly once); script left untouched"
+fi
+OUTT24G=$(OPS_VAULT="$WORK/vault-t24g" OPS_REMOTE="test-crypt:ops-vault-t24g" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t24g" OPS_MARKER="$WORK/vault-t24g.marker.json" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t24g" OPS_SECRETS_MARKER="$WORK/vault-t24g.secrets-marker.json" \
+  run_snap)
+if echo "$OUTT24G" | grep -q "ops-snapshot: verified estate-secrets matches"; then
+  ok "restored script (green, M-S2): 'verified estate-secrets matches' reappears"
+else
+  bad "restored script did not print the verify message: $OUTT24G"
+fi
+
+echo "== T25: MUTATION-PROVE M-S3 -- estate-secrets empty-stage guard removed =="
+mkdir -p "$FAKE_HOME/Projects/seedapp25"
+echo "API_KEY=seedT25" > "$FAKE_HOME/Projects/seedapp25/.env"
+SECMARKT25="$WORK/vault-t25.secrets-marker.json"
+OUTT25SEED=$(OPS_VAULT="$WORK/vault-t25" OPS_REMOTE="test-crypt:ops-vault-t25" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t25" OPS_MARKER="$WORK/vault-t25.marker.json" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t25" \
+  OPS_SECRETS_MARKER="$SECMARKT25" run_snap)
+check "T25 seed: green secrets run exits 0" "$?" "0"
+
+MUTOLD_S3="$WORK/mut-s3-old.txt"; MUTNEW_S3="$WORK/mut-s3-new.txt"
+cat > "$MUTOLD_S3" <<'BLOCK'
+  [ "$n" -gt 0 ] \
+    || { fail_leg "staged 0 secret files under $OPS_HOME, refusing to sync over $OPS_SECRETS_REMOTE/current" "estate-secrets"; return 1; }
+BLOCK
+printf '' > "$MUTNEW_S3"
+if mutate_block "$MUTOLD_S3" "$MUTNEW_S3" "$SUBJECT"; then
+  ok "mutation applied: estate-secrets empty-stage guard removed (M-S3)"
+  OUTT25=$(OPS_HOME="$EMPTY_HOME_T19" OPS_VAULT="$WORK/vault-t25" OPS_REMOTE="test-crypt:ops-vault-t25" \
+    OPS_MEMORY_REMOTE="test-crypt:claude-memory-t25" OPS_MARKER="$WORK/vault-t25.marker.json" \
+    OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t25" \
+    OPS_SECRETS_MARKER="$SECMARKT25" run_snap)
+  RCT25=$?
+  SEEDLIST_T25=$(rclone lsf -R "test-crypt:estate-secrets-t25/current" 2>/dev/null)
+  if [ "$RCT25" -eq 0 ] || ! printf '%s\n' "$SEEDLIST_T25" | grep -qF "Projects/seedapp25/.env"; then
+    ok "MUTATION CONFIRMED (red, M-S3): with the empty-stage guard removed, an empty stage either exits 0 (rc=$RCT25) or empties the remote -- listing: $SEEDLIST_T25"
+  else
+    bad "MUTATION did not reproduce the M-S3 defect (rc=$RCT25); listing: $SEEDLIST_T25"
+  fi
+  restore_subject "T25 (M-S3)"
+else
+  bad "could not apply T25 mutation (block not found exactly once); script left untouched"
+fi
+
+mkdir -p "$FAKE_HOME/Projects/seedapp25g"
+echo "API_KEY=seedT25g" > "$FAKE_HOME/Projects/seedapp25g/.env"
+SECMARKT25G="$WORK/vault-t25g.secrets-marker.json"
+OUTT25GSEED=$(OPS_VAULT="$WORK/vault-t25g" OPS_REMOTE="test-crypt:ops-vault-t25g" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t25g" OPS_MARKER="$WORK/vault-t25g.marker.json" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t25g" \
+  OPS_SECRETS_MARKER="$SECMARKT25G" run_snap)
+OUTT25GEMPTY=$(OPS_HOME="$EMPTY_HOME_T19" OPS_VAULT="$WORK/vault-t25g" OPS_REMOTE="test-crypt:ops-vault-t25g" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t25g" OPS_MARKER="$WORK/vault-t25g.marker.json" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t25g" \
+  OPS_SECRETS_MARKER="$SECMARKT25G" run_snap)
+RCT25GEMPTY=$?
+SEEDLIST_T25G=$(rclone lsf -R "test-crypt:estate-secrets-t25g/current" 2>/dev/null)
+if [ "$RCT25GEMPTY" -eq 1 ] && printf '%s\n' "$SEEDLIST_T25G" | grep -qF "Projects/seedapp25g/.env"; then
+  ok "restored script (green, M-S3): empty-stage run refuses (rc=1) and the remote keeps its seeded file"
+else
+  bad "restored script did not refuse the empty-stage run correctly (rc=$RCT25GEMPTY); listing: $SEEDLIST_T25G"
+fi
+
+echo "== T26: MUTATION-PROVE M-S4 -- estate-secrets nested /mattel- exclusion dropped from the discovery grep =="
+mkdir -p "$FAKE_HOME/Projects/othersub/mattel-secondary"
+echo "API_KEY=t26nested" > "$FAKE_HOME/Projects/othersub/mattel-secondary/.env"
+MUTOLD_S4="$WORK/mut-s4-old.txt"; MUTNEW_S4="$WORK/mut-s4-new.txt"
+cat > "$MUTOLD_S4" <<'BLOCK'
+           | grep -v -e '/_wt/' -e '/node_modules/' -e '/\.venv' -e '/\.git/' -e '/mattel-')
+BLOCK
+cat > "$MUTNEW_S4" <<'BLOCK'
+           | grep -v -e '/_wt/' -e '/node_modules/' -e '/\.venv' -e '/\.git/')
+BLOCK
+if mutate_block "$MUTOLD_S4" "$MUTNEW_S4" "$SUBJECT"; then
+  ok "mutation applied: estate-secrets nested /mattel- exclusion dropped (M-S4)"
+  SECMARKT26="$WORK/vault-t26.secrets-marker.json"
+  OUTT26=$(OPS_VAULT="$WORK/vault-t26" OPS_REMOTE="test-crypt:ops-vault-t26" \
+    OPS_MEMORY_REMOTE="test-crypt:claude-memory-t26" OPS_MARKER="$WORK/vault-t26.marker.json" \
+    OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t26" \
+    OPS_SECRETS_MARKER="$SECMARKT26" run_snap)
+  SECLIST_T26=$(rclone lsf -R "test-crypt:estate-secrets-t26/current" 2>/dev/null)
+  if printf '%s\n' "$SECLIST_T26" | grep -qF "mattel-secondary/.env"; then
+    ok "MUTATION CONFIRMED (red, M-S4): with the /mattel- exclusion dropped, the nested mattel-secondary/.env leaked offsite -- $(printf '%s\n' "$SECLIST_T26" | grep mattel-secondary)"
+  else
+    bad "MUTATION did not reproduce the M-S4 defect -- nested mattel .env still excluded: $SECLIST_T26"
+  fi
+  restore_subject "T26 (M-S4)"
+else
+  bad "could not apply T26 mutation (block not found exactly once); script left untouched"
+fi
+SECMARKT26G="$WORK/vault-t26g.secrets-marker.json"
+OUTT26G=$(OPS_VAULT="$WORK/vault-t26g" OPS_REMOTE="test-crypt:ops-vault-t26g" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t26g" OPS_MARKER="$WORK/vault-t26g.marker.json" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t26g" \
+  OPS_SECRETS_MARKER="$SECMARKT26G" run_snap)
+SECLIST_T26G=$(rclone lsf -R "test-crypt:estate-secrets-t26g/current" 2>/dev/null)
+if printf '%s\n' "$SECLIST_T26G" | grep -qF "mattel-secondary/.env"; then
+  bad "restored script (M-S4) still leaked nested mattel-secondary/.env: $SECLIST_T26G"
+else
+  ok "restored script (green, M-S4): nested mattel-secondary/.env correctly excluded"
+fi
+
+echo "== T27: MUTATION-PROVE M-A1 -- audio-notes copy rc gate defeated (acopy_rc check forced false) =="
+MUTOLD_A1="$WORK/mut-a1-old.txt"; MUTNEW_A1="$WORK/mut-a1-new.txt"
+cat > "$MUTOLD_A1" <<'BLOCK'
+  if [ "$acopy_rc" -ne 0 ]; then
+    fail_leg "rclone copy of audio-notes to $OPS_AUDIO_REMOTE (rc=$acopy_rc)" "audio-notes"
+    return 1
+  fi
+BLOCK
+cat > "$MUTNEW_A1" <<'BLOCK'
+  if [ "$acopy_rc" -ne 0 ] && false; then
+    fail_leg "rclone copy of audio-notes to $OPS_AUDIO_REMOTE (rc=$acopy_rc)" "audio-notes"
+    return 1
+  fi
+BLOCK
+BADBACKINGT27="$WORK/badbacking-t27"; mkdir -p "$BADBACKINGT27"
+chmod -R 555 "$BADBACKINGT27"
+PWT27=$(rclone obscure t27-pw-1); PWT27_2=$(rclone obscure t27-pw-2)
+cat >> "$RCONF" <<CFG
+
+[bad-crypt-t27]
+type = crypt
+remote = $BADBACKINGT27
+password = $PWT27
+password2 = $PWT27_2
+CFG
+if mutate_block "$MUTOLD_A1" "$MUTNEW_A1" "$SUBJECT"; then
+  ok "mutation applied: audio-notes copy rc gate defeated (M-A1)"
+  OUTT27=$(OPS_VAULT="$WORK/vault-t27" OPS_REMOTE="test-crypt:ops-vault-t27" \
+    OPS_MEMORY_REMOTE="test-crypt:claude-memory-t27" OPS_MARKER="$WORK/vault-t27.marker.json" \
+    OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="bad-crypt-t27:sub" OPS_AUDIO_MARKER="$WORK/vault-t27.audio-marker.json" \
+    run_snap)
+  if echo "$OUTT27" | grep -q "ops-snapshot: pushed audio-notes to"; then
+    ok "MUTATION CONFIRMED (red, M-A1): with the copy rc gate defeated, a genuinely failed audio-notes copy (read-only backing dir) is falsely reported as pushed -- $(echo "$OUTT27" | grep 'pushed audio-notes to')"
+  else
+    bad "MUTATION did not reproduce the M-A1 defect: $OUTT27"
+  fi
+  restore_subject "T27 (M-A1)"
+  OUTT27G=$(OPS_VAULT="$WORK/vault-t27g" OPS_REMOTE="test-crypt:ops-vault-t27g" \
+    OPS_MEMORY_REMOTE="test-crypt:claude-memory-t27g" OPS_MARKER="$WORK/vault-t27g.marker.json" \
+    OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="bad-crypt-t27:sub" OPS_AUDIO_MARKER="$WORK/vault-t27g.audio-marker.json" \
+    run_snap)
+  if ! echo "$OUTT27G" | grep -q "ops-snapshot: pushed audio-notes to"; then
+    ok "restored script (green, M-A1): the same failing remote no longer prints the false 'pushed' line"
+  else
+    bad "restored script still printed the false 'pushed' line on the same failing remote: $OUTT27G"
+  fi
+  chmod -R 755 "$BADBACKINGT27" 2>/dev/null
+else
+  bad "could not apply T27 mutation (block not found exactly once); script left untouched"
+fi
+
+echo "== T28: MUTATION-PROVE M-A2 -- audio-notes verify (check + retry) block removed entirely =="
+MUTOLD_A2="$WORK/mut-a2-old.txt"; MUTNEW_A2="$WORK/mut-a2-new.txt"
+cat > "$MUTOLD_A2" <<'BLOCK'
+  local acheck_out acheck_rc
+  acheck_out=$(rclone check --one-way --size-only "${AUDIO_FILTER[@]}" "$src" "$OPS_AUDIO_REMOTE/current" 2>&1)
+  acheck_rc=$?
+  if [ "$acheck_rc" -ne 0 ]; then
+    local acopy2_out acopy2_rc
+    acopy2_out=$(rclone copy "$src" "$OPS_AUDIO_REMOTE/current" \
+          --backup-dir "$OPS_AUDIO_REMOTE/replaced/$STAMP" \
+          "${AUDIO_FILTER[@]}" --transfers 4 --timeout 30m 2>&1)
+    acopy2_rc=$?
+    [ -n "$acopy2_out" ] && printf '%s\n' "$acopy2_out" | tail -3
+    if [ "$acopy2_rc" -ne 0 ]; then
+      fail_leg "rclone copy of audio-notes to $OPS_AUDIO_REMOTE (rc=$acopy2_rc, retry after failed check)" "audio-notes"
+      return 1
+    fi
+    local acheck2_out acheck2_rc acheck2_filtered
+    acheck2_out=$(rclone check --one-way --size-only "${AUDIO_FILTER[@]}" "$src" "$OPS_AUDIO_REMOTE/current" 2>&1)
+    acheck2_rc=$?
+    if [ "$acheck2_rc" -ne 0 ]; then
+      acheck2_filtered=$(printf '%s\n' "$acheck2_out" | grep -v 'No common hash found')
+      [ -n "$acheck2_filtered" ] && printf '%s\n' "$acheck2_filtered" | grep -E 'ERROR|NOTICE' | tail -20
+      fail_leg "rclone check found differences between $src and $OPS_AUDIO_REMOTE/current after one retry (rc=$acheck2_rc)" "audio-notes"
+      return 1
+    fi
+    echo "ops-snapshot: verified audio-notes matches $OPS_AUDIO_REMOTE/current at $TS (after one retry)"
+  else
+    echo "ops-snapshot: verified audio-notes matches $OPS_AUDIO_REMOTE/current at $TS"
+  fi
+BLOCK
+printf '' > "$MUTNEW_A2"
+if mutate_block "$MUTOLD_A2" "$MUTNEW_A2" "$SUBJECT"; then
+  ok "mutation applied: audio-notes verify block removed (M-A2)"
+  OUTT28=$(OPS_VAULT="$WORK/vault-t28" OPS_REMOTE="test-crypt:ops-vault-t28" \
+    OPS_MEMORY_REMOTE="test-crypt:claude-memory-t28" OPS_MARKER="$WORK/vault-t28.marker.json" \
+    OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t28" OPS_AUDIO_MARKER="$WORK/vault-t28.audio-marker.json" \
+    run_snap)
+  RCT28=$?
+  if [ "$RCT28" -eq 0 ] && ! echo "$OUTT28" | grep -q "ops-snapshot: verified audio-notes matches"; then
+    ok "MUTATION CONFIRMED (red, M-A2): with the verify block removed, the run still exits 0 and never prints 'verified audio-notes matches'"
+  else
+    bad "MUTATION did not reproduce the M-A2 defect (rc=$RCT28): $OUTT28"
+  fi
+  restore_subject "T28 (M-A2)"
+else
+  bad "could not apply T28 mutation (block not found exactly once); script left untouched"
+fi
+OUTT28G=$(OPS_VAULT="$WORK/vault-t28g" OPS_REMOTE="test-crypt:ops-vault-t28g" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t28g" OPS_MARKER="$WORK/vault-t28g.marker.json" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t28g" OPS_AUDIO_MARKER="$WORK/vault-t28g.audio-marker.json" \
+  run_snap)
+if echo "$OUTT28G" | grep -q "ops-snapshot: verified audio-notes matches"; then
+  ok "restored script (green, M-A2): 'verified audio-notes matches' reappears"
+else
+  bad "restored script did not print the verify message: $OUTT28G"
+fi
+
 echo "== final sanity: restored subject still bash -n clean, byte-identical to backup, and the tracked $SCRIPT was never touched =="
 /bin/bash -n "$SUBJECT" && ok "restored subject: bash -n clean" || bad "restored subject: bash -n FAILED"
 diff -q "$BACKUP" "$SUBJECT" >/dev/null 2>&1 && ok "restored subject is byte-identical to the pre-mutation backup" || bad "restored subject differs from backup"
 SCRIPT_HASH_AFTER=$(shasum "$SCRIPT" | cut -d' ' -f1)
 check "T1: the tracked $SCRIPT was never written to by this suite" "$SCRIPT_HASH_AFTER" "$SCRIPT_HASH_BEFORE"
 
-chmod -R 755 "$BADBACKINGPF" "$BADBACKINGPFM" "$BADBACKINGT8" "$BADBACKINGT14" 2>/dev/null
-rm -rf "$BADBACKING1" "$BADBACKING2" "$BADBACKINGM" "$BADBACKINGPF" "$BADBACKINGPFM" "$BADBACKINGT8" "$BADBACKINGT14" 2>/dev/null
+chmod -R 755 "$BADBACKINGPF" "$BADBACKINGPFM" "$BADBACKINGT8" "$BADBACKINGT14" "$BADBACKINGT23" "$BADBACKINGT27" 2>/dev/null
+rm -rf "$BADBACKING1" "$BADBACKING2" "$BADBACKINGM" "$BADBACKINGPF" "$BADBACKINGPFM" "$BADBACKINGT8" "$BADBACKINGT14" "$BADBACKINGT23" "$BADBACKINGT27" 2>/dev/null
 
 echo
 echo "SUMMARY: $pass passed, $fail failed"
