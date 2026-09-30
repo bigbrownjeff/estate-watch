@@ -1134,20 +1134,25 @@ else
 fi
 
 echo "== T14b: MUTATION-PROVE T9 -- claude-memory failure lane branch disabled (F2a/F2b) =="
+# a4ecf28 moved fail_leg's dispatch from if/else into a case statement (only the dispatch
+# moved, per that commit's own note; claude-memory's hard-stop behavior via die() did not).
+# The mutation target below is the new case-arm equivalent of the old if/else block: rename
+# the "claude-memory)" case label so it can never match, which falls the lane through to the
+# "*)" default arm -- same defect this test always proved, just at its new address.
 MUTOLD_T14B="$WORK/mut-t14b-old.txt"; MUTNEW_T14B="$WORK/mut-t14b-new.txt"
 cat > "$MUTOLD_T14B" <<'BLOCK'
-  if [ "$lane" = "claude-memory" ]; then
-    title="claude-memory offsite failed: $msg"
-    dedupe="claude-memory-offsite-failed"
-    detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
-  else
+    claude-memory)
+      title="claude-memory offsite failed: $msg"
+      dedupe="claude-memory-offsite-failed"
+      detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+      ;;
 BLOCK
 cat > "$MUTNEW_T14B" <<'BLOCK'
-  if [ "$lane" = "__never__" ]; then
-    title="claude-memory offsite failed: $msg"
-    dedupe="claude-memory-offsite-failed"
-    detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
-  else
+    __never__)
+      title="claude-memory offsite failed: $msg"
+      dedupe="claude-memory-offsite-failed"
+      detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+      ;;
 BLOCK
 if mutate_block "$MUTOLD_T14B" "$MUTNEW_T14B" "$SUBJECT"; then
   ok "mutation applied: claude-memory failure lane branch disabled (F2a/F2b)"
