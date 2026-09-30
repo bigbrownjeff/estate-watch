@@ -831,7 +831,7 @@ echo "== T3 (M04 pin): MUTATION-PROVE claude-memory crypt-type check removed =="
 MUTOLD_M04="$WORK/mut-m04-old.txt"; MUTNEW_M04="$WORK/mut-m04-new.txt"
 cat > "$MUTOLD_M04" <<'BLOCK'
     mrtype=$(rclone config show "${MEMORY_REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
-    [ "$mrtype" = "crypt" ] || die "refusing claude-memory offsite: remote ${MEMORY_REMOTE%%:*} is type '${mrtype:-unknown}', not crypt" "claude-memory"
+    [ "$mrtype" = "crypt" ] || { fail_leg "refusing claude-memory offsite: remote ${MEMORY_REMOTE%%:*} is type '${mrtype:-unknown}', not crypt" "claude-memory"; return 1; }
 BLOCK
 cat > "$MUTNEW_M04" <<'BLOCK'
     mrtype=$(rclone config show "${MEMORY_REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
@@ -920,7 +920,7 @@ cat > "$MUTOLD_M14" <<'BLOCK'
     mpre_err=$(rclone lsd --max-depth 1 "$MEMORY_REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null)
     mpre_rc=$?
     if [ "$mpre_rc" -ne 0 ] && [ "$mpre_rc" -ne 3 ]; then
-      die "claude-memory offsite preflight failed for $MEMORY_REMOTE (auth or reachability); rclone said: $mpre_err" "claude-memory"
+      { fail_leg "claude-memory offsite preflight failed for $MEMORY_REMOTE (auth or reachability); rclone said: $mpre_err" "claude-memory"; return 1; }
     fi
 BLOCK
 cat > "$MUTNEW_M14" <<'BLOCK'
@@ -995,6 +995,7 @@ rm -f "$FT_LOG"
 VAULTT9A="$WORK/vault-t9a"
 MARKT9A="$WORK/vault-t9a.marker.json"
 HOME="$FT_HOME" OPS_HOME="$FT_HOME" RCLONE_CONFIG="$RCONF" \
+  OPS_SECRETS_OFFSITE=0 OPS_AUDIO_OFFSITE=0 \
   OPS_VAULT="$VAULTT9A" OPS_REMOTE="test-crypt:ops-vault-t9a" \
   OPS_MEMORY_REMOTE="test-plain:$PLAINBACKING" OPS_MARKER="$MARKT9A" \
   /bin/bash "$SUBJECT" >/dev/null 2>&1
@@ -1011,6 +1012,7 @@ rm -f "$FT_LOG"
 VAULTT9B="$WORK/vault-t9b"
 MARKT9B="$WORK/vault-t9b.marker.json"
 HOME="$FT_HOME" OPS_HOME="$FT_HOME" RCLONE_CONFIG="$RCONF" \
+  OPS_SECRETS_OFFSITE=0 OPS_AUDIO_OFFSITE=0 \
   OPS_VAULT="$VAULTT9B" OPS_REMOTE="test-plain:$PLAINBACKING" \
   OPS_MEMORY_REMOTE="test-crypt:claude-memory" OPS_MARKER="$MARKT9B" \
   /bin/bash "$SUBJECT" >/dev/null 2>&1
@@ -1090,7 +1092,7 @@ echo "$T13_EMPTY_OUT" | grep -q "^  FAIL" \
 
 echo "== T14a: MUTATION-PROVE T8 -- claude-memory copy gate replaced with a no-op ([ mcopy_rc -eq 0 ] || true, M05b) =="
 MUTOLD_M05B="$WORK/mut-m05b-old.txt"; MUTNEW_M05B="$WORK/mut-m05b-new.txt"
-printf '%s' '[ "$mcopy_rc" -eq 0 ] || die "rclone copy of claude-memory to $MEMORY_REMOTE (rc=$mcopy_rc)" "claude-memory"' > "$MUTOLD_M05B"
+printf '%s' '[ "$mcopy_rc" -eq 0 ] || { fail_leg "rclone copy of claude-memory to $MEMORY_REMOTE (rc=$mcopy_rc)" "claude-memory"; return 1; }' > "$MUTOLD_M05B"
 printf '%s' '[ "$mcopy_rc" -eq 0 ] || true' > "$MUTNEW_M05B"
 BADBACKINGT14="$WORK/badbacking-t14"; mkdir -p "$BADBACKINGT14"
 chmod -R 555 "$BADBACKINGT14"
