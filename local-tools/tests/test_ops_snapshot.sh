@@ -1181,6 +1181,197 @@ else
   bad "could not apply T14b mutation (block not found exactly once); script left untouched"
 fi
 
+echo "== T15: estate-secrets leg green -- fixed paths + discovered .env/.dev.vars land offsite, _wt/ and mattel-engagement excluded, marker mode 600, staging dir cleaned, nothing new in \$OPS_VAULT =="
+mkdir -p "$FAKE_HOME/.config/rclone" "$FAKE_HOME/.wrangler/config" \
+  "$FAKE_HOME/Library/Preferences/.wrangler/config" \
+  "$FAKE_HOME/Projects/app" "$FAKE_HOME/Projects/_wt/x" "$FAKE_HOME/Projects/mattel-engagement"
+echo "not-a-real-rclone-conf"     > "$FAKE_HOME/.config/rclone/rclone.conf"
+echo "not-a-real-wrangler-toml"   > "$FAKE_HOME/.wrangler/config/default.toml"
+echo "not-a-real-wrangler-toml-2" > "$FAKE_HOME/Library/Preferences/.wrangler/config/default.toml"
+echo "API_KEY=notreal"  > "$FAKE_HOME/Projects/app/.env"
+echo "API_KEY=notreal2" > "$FAKE_HOME/Projects/_wt/x/.env"
+echo "API_KEY=notreal3" > "$FAKE_HOME/Projects/mattel-engagement/.env"
+
+VAULTT15="$WORK/vault-t15"
+MARKT15="$WORK/vault-t15.marker.json"
+SECMARKT15="$WORK/vault-t15.secrets-marker.json"
+OUTT15=$(OPS_VAULT="$VAULTT15" OPS_REMOTE="test-crypt:ops-vault-t15" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t15" OPS_MARKER="$MARKT15" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-crypt:estate-secrets-t15" \
+  OPS_SECRETS_MARKER="$SECMARKT15" run_snap)
+RCT15=$?
+check "T15: secrets-green run exits 0" "$RCT15" "0"
+if [ "$RCT15" -ne 0 ]; then echo "$OUTT15"; fi
+
+SECLIST_T15=$(rclone lsf -R "test-crypt:estate-secrets-t15/current" 2>/dev/null)
+for expect in ".claude/secrets/apikey.txt" ".cloudflared/cert.pem" ".config/rclone/rclone.conf" \
+              ".wrangler/config/default.toml" "Library/Preferences/.wrangler/config/default.toml" \
+              "Projects/app/.env"; do
+  if printf '%s\n' "$SECLIST_T15" | grep -qF "$expect"; then
+    ok "T15: $expect present offsite"
+  else
+    bad "T15: $expect MISSING offsite -- listing was: $SECLIST_T15"
+  fi
+done
+if printf '%s\n' "$SECLIST_T15" | grep -qF "_wt/x/.env"; then
+  bad "T15: worktree .env leaked offsite (Projects/_wt/ must be excluded)"
+else
+  ok "T15: worktree .env correctly excluded"
+fi
+if printf '%s\n' "$SECLIST_T15" | grep -q "mattel-engagement"; then
+  bad "T15: mattel-engagement .env leaked offsite (that repo must be pruned entirely)"
+else
+  ok "T15: mattel-engagement .env correctly excluded"
+fi
+
+if [ -f "$SECMARKT15" ]; then
+  ok "T15: secrets marker written"
+  MODE_T15=$(stat -f '%Lp' "$SECMARKT15" 2>/dev/null)
+  check "T15: secrets marker mode 600" "$MODE_T15" "600"
+else
+  bad "T15: secrets marker NOT written"
+fi
+
+STAGE_LEFT_T15=$(find "$FAKE_HOME" -maxdepth 1 -name '.ops-snapshot-secrets.*' 2>/dev/null)
+if [ -z "$STAGE_LEFT_T15" ]; then
+  ok "T15: no leftover secrets staging dir under \$OPS_HOME"
+else
+  bad "T15: leftover secrets staging dir(s) under \$OPS_HOME: $STAGE_LEFT_T15"
+fi
+
+assert_allowlisted "$VAULTT15/claude" "$CLAUDE_ALLOWED" "T15 vault/claude (nothing new in \$OPS_VAULT)"
+assert_allowlisted "$VAULTT15/home"   "$HOME_ALLOWED"   "T15 vault/home (nothing new in \$OPS_VAULT)"
+
+echo "== T16: audio-notes leg green -- files land, models/ excluded, marker carries files+bytes, copy (not sync) never deletes a remote-only file on a later run =="
+mkdir -p "$FAKE_HOME/.claude/audio-notes/models" "$FAKE_HOME/.claude/audio-notes/call-2026-09-20"
+echo "audio chunk 1" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-20/chunk1.wav"
+echo "audio chunk 2" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-20/chunk2.wav"
+echo "big whisper model, must never leave the machine" > "$FAKE_HOME/.claude/audio-notes/models/ggml-base.bin"
+
+VAULTT16="$WORK/vault-t16"
+MARKT16="$WORK/vault-t16.marker.json"
+AUDMARKT16="$WORK/vault-t16.audio-marker.json"
+OUTT16=$(OPS_VAULT="$VAULTT16" OPS_REMOTE="test-crypt:ops-vault-t16" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t16" OPS_MARKER="$MARKT16" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t16" \
+  OPS_AUDIO_MARKER="$AUDMARKT16" run_snap)
+RCT16=$?
+check "T16: audio-green first run exits 0" "$RCT16" "0"
+if [ "$RCT16" -ne 0 ]; then echo "$OUTT16"; fi
+
+AUDLIST_T16=$(rclone lsf -R "test-crypt:audio-notes-t16/current" 2>/dev/null)
+for expect in "call-2026-09-20/chunk1.wav" "call-2026-09-20/chunk2.wav"; do
+  if printf '%s\n' "$AUDLIST_T16" | grep -qF "$expect"; then
+    ok "T16: $expect present offsite"
+  else
+    bad "T16: $expect MISSING offsite -- listing was: $AUDLIST_T16"
+  fi
+done
+if printf '%s\n' "$AUDLIST_T16" | grep -q "models/"; then
+  bad "T16: models/ leaked offsite (must be excluded)"
+else
+  ok "T16: models/ correctly excluded offsite"
+fi
+
+if [ -f "$AUDMARKT16" ]; then
+  ok "T16: audio marker written"
+  FILES_T16=$(sed -n 's/.*"files":\([0-9]*\).*/\1/p' "$AUDMARKT16")
+  BYTES_T16=$(sed -n 's/.*"bytes":\([0-9]*\).*/\1/p' "$AUDMARKT16")
+  if [ -n "$FILES_T16" ] && [ "$FILES_T16" -gt 0 ] 2>/dev/null; then
+    ok "T16: audio marker files count > 0 ($FILES_T16)"
+  else
+    bad "T16: audio marker files count missing or zero: $(cat "$AUDMARKT16" 2>/dev/null)"
+  fi
+  if [ -n "$BYTES_T16" ] && [ "$BYTES_T16" -gt 0 ] 2>/dev/null; then
+    ok "T16: audio marker bytes count > 0 ($BYTES_T16)"
+  else
+    bad "T16: audio marker bytes count missing or zero: $(cat "$AUDMARKT16" 2>/dev/null)"
+  fi
+else
+  bad "T16: audio marker NOT written"
+fi
+
+echo "  -- copy-not-sync: delete one local file, run again against the same remote, prove it survives offsite --"
+rm -f "$FAKE_HOME/.claude/audio-notes/call-2026-09-20/chunk1.wav"
+VAULTT16B="$WORK/vault-t16b"
+MARKT16B="$WORK/vault-t16b.marker.json"
+AUDMARKT16B="$WORK/vault-t16b.audio-marker.json"
+OUTT16B=$(OPS_VAULT="$VAULTT16B" OPS_REMOTE="test-crypt:ops-vault-t16b" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t16b" OPS_MARKER="$MARKT16B" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t16" \
+  OPS_AUDIO_MARKER="$AUDMARKT16B" run_snap)
+RCT16B=$?
+check "T16: audio-green second run (after local delete) exits 0" "$RCT16B" "0"
+AUDLIST_T16B=$(rclone lsf -R "test-crypt:audio-notes-t16/current" 2>/dev/null)
+if printf '%s\n' "$AUDLIST_T16B" | grep -qF "call-2026-09-20/chunk1.wav"; then
+  ok "T16: copy (not sync) left the locally-deleted file on the remote"
+else
+  bad "T16: chunk1.wav vanished offsite after a local delete -- the audio leg is syncing (deleting), not copying"
+fi
+
+echo "== T17: independent legs -- estate-secrets refused (non-crypt remote) must not block audio-notes succeeding =="
+mkdir -p "$FAKE_HOME/.claude/audio-notes/call-2026-09-21"
+echo "audio chunk t17" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-21/chunk1.wav"
+
+VAULTT17="$WORK/vault-t17"
+MARKT17="$WORK/vault-t17.marker.json"
+SECMARKT17="$WORK/vault-t17.secrets-marker.json"
+AUDMARKT17="$WORK/vault-t17.audio-marker.json"
+OUTT17=$(OPS_VAULT="$VAULTT17" OPS_REMOTE="test-crypt:ops-vault-t17" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t17" OPS_MARKER="$MARKT17" \
+  OPS_SECRETS_OFFSITE=1 OPS_SECRETS_REMOTE="test-plain:$PLAINBACKING/estate-secrets-t17" \
+  OPS_SECRETS_MARKER="$SECMARKT17" \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-crypt:audio-notes-t17" \
+  OPS_AUDIO_MARKER="$AUDMARKT17" run_snap)
+RCT17=$?
+check "T17: overall run exits 1 (secrets leg refused)" "$RCT17" "1"
+if echo "$OUTT17" | grep -q "refusing offsite: remote test-plain is type 'local', not crypt"; then
+  ok "T17: estate-secrets leg correctly refused the non-crypt remote"
+else
+  bad "T17: expected secrets crypt-refusal message not seen: $OUTT17"
+fi
+if [ -f "$SECMARKT17" ]; then
+  bad "T17: secrets marker WAS written despite the leg failing"
+else
+  ok "T17: secrets marker correctly not written"
+fi
+if [ -f "$AUDMARKT17" ]; then
+  ok "T17: audio marker written even though the secrets leg failed (legs are independent)"
+else
+  bad "T17: audio marker NOT written -- the secrets failure incorrectly blocked the audio leg"
+fi
+AUDLIST_T17=$(rclone lsf -R "test-crypt:audio-notes-t17/current" 2>/dev/null)
+if printf '%s\n' "$AUDLIST_T17" | grep -qF "call-2026-09-21/chunk1.wav"; then
+  ok "T17: audio files pushed offsite despite the secrets leg failing"
+else
+  bad "T17: audio files missing offsite -- listing was: $AUDLIST_T17"
+fi
+
+echo "== T18: audio-notes leg refuses a non-crypt remote =="
+mkdir -p "$FAKE_HOME/.claude/audio-notes/call-2026-09-22"
+echo "audio chunk t18" > "$FAKE_HOME/.claude/audio-notes/call-2026-09-22/chunk1.wav"
+
+VAULTT18="$WORK/vault-t18"
+MARKT18="$WORK/vault-t18.marker.json"
+AUDMARKT18="$WORK/vault-t18.audio-marker.json"
+OUTT18=$(OPS_VAULT="$VAULTT18" OPS_REMOTE="test-crypt:ops-vault-t18" \
+  OPS_MEMORY_REMOTE="test-crypt:claude-memory-t18" OPS_MARKER="$MARKT18" \
+  OPS_SECRETS_OFFSITE=0 \
+  OPS_AUDIO_OFFSITE=1 OPS_AUDIO_REMOTE="test-plain:$PLAINBACKING/audio-notes-t18" \
+  OPS_AUDIO_MARKER="$AUDMARKT18" run_snap)
+RCT18=$?
+check "T18: exits 1 when the audio remote is refused" "$RCT18" "1"
+if echo "$OUTT18" | grep -q "refusing audio-notes offsite: remote test-plain is type 'local', not crypt"; then
+  ok "T18: audio-notes leg correctly refused the non-crypt remote"
+else
+  bad "T18: expected audio crypt-refusal message not seen: $OUTT18"
+fi
+if [ -f "$AUDMARKT18" ]; then
+  bad "T18: audio marker WAS written despite the leg being refused"
+else
+  ok "T18: audio marker correctly not written"
+fi
+
 echo "== final sanity: restored subject still bash -n clean, byte-identical to backup, and the tracked $SCRIPT was never touched =="
 /bin/bash -n "$SUBJECT" && ok "restored subject: bash -n clean" || bad "restored subject: bash -n FAILED"
 diff -q "$BACKUP" "$SUBJECT" >/dev/null 2>&1 && ok "restored subject is byte-identical to the pre-mutation backup" || bad "restored subject differs from backup"
