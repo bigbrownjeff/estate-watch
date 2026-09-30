@@ -16,6 +16,14 @@
 #      exactly why a plaintext GitHub mirror (and its permanent scrub gate) was rejected.
 #
 # Deletions are never destructive: rclone sync writes removals to a dated backup-dir.
+#
+# Secrets and audio-notes offsite (Jeff's ruling, 2026-09-30, verbatim "API backup yes.
+# Call backup yes."): both trees were previously excluded on purpose (see the generated
+# RESTORE.md's own "Excluded on purpose" section, before this change). They now get their
+# own independent, encrypted, never-through-the-plaintext-vault legs (estate-secrets,
+# audio-notes below) -- staged secrets never enter $VAULT or its git history. The one
+# standing exclusion is Projects/mattel-engagement: a client repo whose local overlay
+# stays off any offsite copy.
 set -u
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
 
@@ -36,37 +44,86 @@ OPS_MARKER="${OPS_MARKER:-$HOME/data-vaults/ops-vault/last-ok.json}"
 # that is supposed to verify that exact push.
 MAIN_FILTER=(--exclude '.DS_Store')
 MEM_FILTER=(--exclude '.DS_Store')
+# estate-secrets: API keys, tunnel credentials, rclone/wrangler configs and per-repo
+# .env/.dev.vars files, staged fresh every run into a mode-700 mktemp dir under $OPS_HOME
+# (never /tmp, never $VAULT) and pushed encrypted. Never through the plaintext ops-vault.
+OPS_SECRETS_OFFSITE="${OPS_SECRETS_OFFSITE:-1}"
+OPS_SECRETS_REMOTE="${OPS_SECRETS_REMOTE:-gdw-crypt:estate-secrets}"
+OPS_SECRETS_MARKER="${OPS_SECRETS_MARKER:-$OPS_HOME/data-vaults/estate-secrets-offsite/last-ok.json}"
+SECRETS_FILTER=(--exclude '.DS_Store')
+# audio-notes: 2.3G of call recordings, ~1.8G after excluding the replaceable whisper
+# models/ subdir. rclone COPY, never sync -- this leg does not own rotation for this tree.
+OPS_AUDIO_OFFSITE="${OPS_AUDIO_OFFSITE:-1}"
+OPS_AUDIO_REMOTE="${OPS_AUDIO_REMOTE:-gdw-crypt:data-vaults/audio-notes}"
+OPS_AUDIO_MARKER="${OPS_AUDIO_MARKER:-$OPS_HOME/data-vaults/audio-notes-offsite/last-ok.json}"
+AUDIO_FILTER=(--exclude 'models/**' --exclude '.DS_Store')
 TS=$(date '+%Y-%m-%d %H:%M:%S')
 # Second-resolution: a DATE-only backup-dir key collides across every push in
 # the same day, so a second run's overwrite silently replaces the FIRST run's
 # archived copy instead of adding a new one.
 STAMP=$(date '+%Y-%m-%dT%H%M%S')
 FAILTASK="$HOME/.claude/bin/failtask"
+# Independent-leg failure count (S3): the ops-vault and claude-memory legs still hard-stop
+# on their own failure via die() (unchanged, see the S3 note in the die()/fail_leg block
+# below), but estate-secrets and audio-notes are new, mutually independent legs -- one
+# failing must never block the other, or stop the script before the marker files for a
+# leg that DID succeed get written. LEGS_FAILED is what makes the script still exit
+# nonzero at the very end if either of them failed, even though neither calls exit itself.
+LEGS_FAILED=0
 
 # OPS_NO_FAILTASK=1 suppresses the board-task filing only; the failure is
 # still printed and the script still exits nonzero. A test drives a
 # deliberate failure fixture and sets this so it never files a real task.
 #
-# $2 (default "ops") picks the board card's title/dedupe-key/detail. The claude-memory
-# leg is a separate lane on purpose: it must file its own card under its own dedupe key,
-# never reuse or overwrite the ops-vault leg's card, and it must never touch $OPS_MARKER,
-# which this function does not do either way.
-die() {
+# $2 (default "ops") picks the board card's title/dedupe-key/detail. Each leg is a
+# separate lane on purpose: it must file its own card under its own dedupe key, never
+# reuse or overwrite another leg's card. Only the ops-vault leg touches $OPS_MARKER, and
+# only after its own push+check succeed; this function never does.
+#
+# S3 split fail_leg (files the task, prints, RETURNS 1 -- never exits) from die() (the
+# same, then exit 1). Design decision, flagged per the spec: ops-vault and claude-memory
+# keep today's hard-stop behavior unchanged (both still call die()) -- ops-vault because
+# nothing downstream can succeed if $VAULT itself can't be created or committed to, and
+# claude-memory because that lane's control flow was not part of this change's scope
+# (only its dispatch text moved from if/else into this case). estate-secrets and
+# audio-notes are the two NEW, mutually independent legs S3 requires: they call fail_leg
+# and return, so a secrets failure never stops the audio leg (or vice versa), and
+# LEGS_FAILED (set once, near the top of the script) is what still exits the whole script
+# nonzero at the end if either of them failed.
+fail_leg() {
   local msg="$1" lane="${2:-ops}" title dedupe detail
-  if [ "$lane" = "claude-memory" ]; then
-    title="claude-memory offsite failed: $msg"
-    dedupe="claude-memory-offsite-failed"
-    detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
-  else
-    title="ops-snapshot failed: $msg"
-    dedupe="ops-snapshot-failed"
-    detail="The ops-layer backup did not complete at $TS. ~/.claude has no other backup, so every hour this stays broken is unprotected. Log: ~/.claude/failures/ops-snapshot.log"
-  fi
+  case "$lane" in
+    claude-memory)
+      title="claude-memory offsite failed: $msg"
+      dedupe="claude-memory-offsite-failed"
+      detail="The claude-memory offsite backup did not complete at $TS. ~/data-vaults/claude-memory has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+      ;;
+    estate-secrets)
+      title="estate-secrets offsite failed: $msg"
+      dedupe="estate-secrets-offsite-failed"
+      detail="The estate-secrets offsite backup did not complete at $TS. API keys, tunnel credentials, rclone/wrangler configs and per-repo .env/.dev.vars files have no offsite copy of their own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+      ;;
+    audio-notes)
+      title="audio-notes offsite failed: $msg"
+      dedupe="audio-notes-offsite-failed"
+      detail="The audio-notes offsite backup did not complete at $TS. ~/.claude/audio-notes has no offsite copy of its own until this leg succeeds again. Log: ~/.claude/failures/ops-snapshot.log"
+      ;;
+    *)
+      title="ops-snapshot failed: $msg"
+      dedupe="ops-snapshot-failed"
+      detail="The ops-layer backup did not complete at $TS. ~/.claude has no other backup, so every hour this stays broken is unprotected. Log: ~/.claude/failures/ops-snapshot.log"
+      ;;
+  esac
   echo "ops-snapshot: FAILED — $msg"
   if [ -x "$FAILTASK" ] && [ "${OPS_NO_FAILTASK:-}" != "1" ]; then
     "$FAILTASK" infra "$title" --detail "$detail" \
       --dedupe-key "$dedupe" --severity error >/dev/null 2>&1
   fi
+  return 1
+}
+
+die() {
+  fail_leg "$@"
   exit 1
 }
 
@@ -196,6 +253,8 @@ offsite copy of their own until then.
 | Working files | `~/.claude`, `~/Library/LaunchAgents`, `~/.local/bin` | nothing — the originals |
 | Local history | `~/ops-vault` (git, branch `primary`, **no remote by design**) | a bad edit |
 | Offsite | `gdw-crypt:ops-vault/current` (rclone, client-side encrypted) | laptop loss |
+| Secrets offsite | `gdw-crypt:estate-secrets/current` (rclone, client-side encrypted) | laptop loss |
+| Audio offsite | `gdw-crypt:data-vaults/audio-notes/current` (rclone, client-side encrypted) | laptop loss |
 
 Deletions and overwrites are archived to `gdw-crypt:ops-vault/replaced/<stamp>` first, and
 every push is verified file by file (`rclone check --one-way --size-only`), not just
@@ -247,13 +306,39 @@ memory-sync, not this leg, and is simply backed up like any other file in that t
    marker lives at `~/data-vaults/claude-memory-offsite/last-ok.json`, a directory of its
    own, never inside `~/data-vaults/claude-memory` itself.
 
+## Restore the estate-secrets offsite copy
+
+`rclone copy gdw-crypt:estate-secrets/current ~/estate-secrets-restore`, then place each
+file back at its original relative path under `~` (the staged tree mirrors `~` exactly:
+`.claude/secrets/...`, `.cloudflared/...`, `.config/rclone/rclone.conf`,
+`.wrangler/config/default.toml`, `Library/Preferences/.wrangler/config/default.toml`, and
+each project's `.env`/`.dev.vars` under `Projects/<repo>/...`). rclone does not reliably
+round-trip original Unix modes through a crypt remote the way local `rsync -a` does inside
+`~/ops-vault`, so after copying each file back, set its mode explicitly:
+`chmod 600 <restored-file>`. Never restore into a git-tracked tree. Turned off with
+`OPS_SECRETS_OFFSITE=0`. Freshness marker at
+`~/data-vaults/estate-secrets-offsite/last-ok.json` (override with `OPS_SECRETS_MARKER`).
+
+## Restore the audio-notes offsite copy
+
+`rclone copy gdw-crypt:data-vaults/audio-notes/current ~/.claude/audio-notes`. Pushed with
+`rclone copy`, so nothing offsite is ever deleted by this leg and the local `models/`
+subdir (excluded from the push, replaceable whisper models) is untouched by a restore too
+— reinstall those separately. Turned off with `OPS_AUDIO_OFFSITE=0`. Freshness marker at
+`~/data-vaults/audio-notes-offsite/last-ok.json` (override with `OPS_AUDIO_MARKER`).
+
 ## Excluded on purpose
 
-Transcripts (`~/.claude/projects/*` except `memory/`), audio-notes, uploads, file-history,
-runlogs, worklog, plugins — bulky and replaceable. Also `links/site` and
-`links/launchpad.html`: generated output, re-derivable from `registry.json` + `render.py`.
-Including them once turned an 11 MB nightly into 457 MB. `~/data-vaults/claude-memory` is
-not excluded; it is covered by the separate leg in step 7 above, not by this vault's mirror.
+Transcripts (`~/.claude/projects/*` except `memory/`), uploads, file-history, runlogs,
+worklog, plugins — bulky and replaceable. Also `links/site` and `links/launchpad.html`:
+generated output, re-derivable from `registry.json` + `render.py`. Including them once
+turned an 11 MB nightly into 457 MB. `~/data-vaults/claude-memory` is not excluded; it is
+covered by the separate leg in step 7 above, not by this vault's mirror. `audio-notes` is
+no longer excluded either (2026-09-30 ruling) — only its `models/` subdirectory is, same
+pattern as `claude-memory`: covered by its own leg above, not by this vault's mirror.
+Secrets are likewise covered by their own leg, never by this vault's mirror. The one
+standing exclusion is `Projects/mattel-engagement`: a client repo whose local overlay
+stays off any offsite copy, including the estate-secrets leg.
 
 ## Why no GitHub mirror
 
@@ -409,3 +494,188 @@ if [ "${OPS_MEMORY_VAULT_OFFSITE:-1}" = "1" ]; then
 else
   echo "ops-snapshot: claude-memory offsite disabled (OPS_MEMORY_VAULT_OFFSITE=0)"
 fi
+
+# ---- estate-secrets offsite (independent leg, S1) -------------------------------
+# API keys, login files, tunnel credentials, rclone/wrangler configs and per-repo
+# .env/.dev.vars, staged fresh every run and pushed encrypted. Never through $VAULT.
+# Returns 1 (via fail_leg) instead of exiting so a failure here never blocks the
+# audio-notes leg below; the top-level LEGS_FAILED counter is what still fails the
+# script at the very end.
+run_secrets_leg() {
+  local stage n fixed=() envfiles=() p f
+  stage=$(mktemp -d "$OPS_HOME/.ops-snapshot-secrets.XXXXXX" 2>/dev/null) \
+    || { fail_leg "cannot create secrets staging dir under $OPS_HOME" "estate-secrets"; return 1; }
+  chmod 700 "$stage"
+  # Guard the trap so it can only ever remove this one mktemp path: the value is
+  # captured now (double-quoted, expanded at trap-set time), never reconstructed
+  # inside the trap body itself.
+  trap "rm -rf '$stage'" EXIT
+
+  for p in ".claude/secrets" ".cloudflared" ".config/rclone/rclone.conf" \
+           ".wrangler/config/default.toml" \
+           "Library/Preferences/.wrangler/config/default.toml"; do
+    [ -e "$OPS_HOME/$p" ] && fixed+=("$p")
+  done
+
+  # Every regular file named exactly .env or .dev.vars under $OPS_HOME/Projects,
+  # maxdepth 4, excluding _wt/ worktrees, node_modules, .venv, .git, and pruning
+  # Projects/mattel-engagement entirely (a client repo, not a real-absence check --
+  # the exclusion must hold even on a machine where that repo DOES have a .env).
+  while IFS= read -r f; do
+    [ -n "$f" ] && envfiles+=("${f#"$OPS_HOME"/}")
+  done < <(find "$OPS_HOME/Projects" -maxdepth 4 \
+             -path "$OPS_HOME/Projects/mattel-engagement" -prune -o \
+             \( -type f \( -name .env -o -name .dev.vars \) -print \) 2>/dev/null \
+           | grep -v -e '/_wt/' -e '/node_modules/' -e '/\.venv' -e '/\.git/')
+
+  if [ "${#fixed[@]}" -gt 0 ]; then
+    (cd "$OPS_HOME" && rsync -a -R ${fixed[@]+"${fixed[@]}"} "$stage/") \
+      || { fail_leg "rsync staging fixed secret paths" "estate-secrets"; return 1; }
+  fi
+  if [ "${#envfiles[@]}" -gt 0 ]; then
+    (cd "$OPS_HOME" && rsync -a -R ${envfiles[@]+"${envfiles[@]}"} "$stage/") \
+      || { fail_leg "rsync staging discovered .env/.dev.vars files" "estate-secrets"; return 1; }
+  fi
+  n=$(find "$stage" -type f 2>/dev/null | wc -l | tr -d ' ')
+  echo "ops-snapshot: staged $n secret file(s)"
+
+  local srtype
+  srtype=$(rclone config show "${OPS_SECRETS_REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
+  [ "$srtype" = "crypt" ] \
+    || { fail_leg "refusing offsite: remote ${OPS_SECRETS_REMOTE%%:*} is type '${srtype:-unknown}', not crypt" "estate-secrets"; return 1; }
+
+  local spre_err spre_rc
+  spre_err=$(rclone lsd --max-depth 1 "$OPS_SECRETS_REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null)
+  spre_rc=$?
+  if [ "$spre_rc" -ne 0 ] && [ "$spre_rc" -ne 3 ]; then
+    fail_leg "offsite preflight failed for $OPS_SECRETS_REMOTE (auth or reachability); rclone said: $spre_err" "estate-secrets"
+    return 1
+  fi
+
+  local ssync_out ssync_rc
+  ssync_out=$(rclone sync "$stage" "$OPS_SECRETS_REMOTE/current" \
+        --backup-dir "$OPS_SECRETS_REMOTE/replaced/$STAMP" \
+        "${SECRETS_FILTER[@]}" --transfers 4 --timeout 5m 2>&1)
+  ssync_rc=$?
+  [ -n "$ssync_out" ] && printf '%s\n' "$ssync_out" | tail -3
+  if [ "$ssync_rc" -ne 0 ]; then
+    fail_leg "rclone sync to $OPS_SECRETS_REMOTE (rc=$ssync_rc)" "estate-secrets"
+    return 1
+  fi
+  echo "ops-snapshot: pushed estate-secrets to $OPS_SECRETS_REMOTE/current at $TS"
+
+  local scheck_out scheck_rc scheck_filtered
+  scheck_out=$(rclone check --one-way --size-only "${SECRETS_FILTER[@]}" "$stage" "$OPS_SECRETS_REMOTE/current" 2>&1)
+  scheck_rc=$?
+  if [ "$scheck_rc" -ne 0 ]; then
+    scheck_filtered=$(printf '%s\n' "$scheck_out" | grep -v 'No common hash found')
+    [ -n "$scheck_filtered" ] && printf '%s\n' "$scheck_filtered" | grep -E 'ERROR|NOTICE' | tail -20
+    fail_leg "rclone check found differences between staged secrets and $OPS_SECRETS_REMOTE/current (rc=$scheck_rc)" "estate-secrets"
+    return 1
+  fi
+  echo "ops-snapshot: verified estate-secrets matches $OPS_SECRETS_REMOTE/current at $TS"
+
+  mkdir -p "$(dirname "$OPS_SECRETS_MARKER")" \
+    || { fail_leg "cannot create $(dirname "$OPS_SECRETS_MARKER")" "estate-secrets"; return 1; }
+  printf '{"lane":"estate-secrets","last_ok":"%s","files":%s,"offsite":true}\n' \
+    "$(date -Iseconds)" "$n" > "$OPS_SECRETS_MARKER" \
+    || { fail_leg "cannot write $OPS_SECRETS_MARKER" "estate-secrets"; return 1; }
+  chmod 600 "$OPS_SECRETS_MARKER" 2>/dev/null
+  return 0
+}
+
+if [ "$OPS_SECRETS_OFFSITE" = "1" ]; then
+  run_secrets_leg || LEGS_FAILED=$((LEGS_FAILED + 1))
+else
+  echo "ops-snapshot: estate-secrets offsite disabled (OPS_SECRETS_OFFSITE=0)"
+fi
+
+# ---- audio-notes offsite (independent leg, S2) -----------------------------------
+# ~/.claude/audio-notes (call recordings), excluding the replaceable models/ subdir.
+# rclone COPY, never sync/delete -- this leg does not own rotation for this tree,
+# same rule as claude-memory. One retry on a failed check: a call may still be
+# mid-recording, so a file still growing during the check window is expected, not a
+# real failure -- give it exactly one more copy+check cycle before treating it as one.
+run_audio_leg() {
+  local src="$OPS_HOME/.claude/audio-notes"
+  if [ ! -e "$src" ]; then
+    echo "ops-snapshot: audio offsite skipped, no $src"
+    return 0
+  fi
+
+  local artype
+  artype=$(rclone config show "${OPS_AUDIO_REMOTE%%:*}" 2>/dev/null | sed -n 's/^type = //p')
+  [ "$artype" = "crypt" ] \
+    || { fail_leg "refusing audio-notes offsite: remote ${OPS_AUDIO_REMOTE%%:*} is type '${artype:-unknown}', not crypt" "audio-notes"; return 1; }
+
+  local apre_err apre_rc
+  apre_err=$(rclone lsd --max-depth 1 "$OPS_AUDIO_REMOTE" --timeout 20s --contimeout 10s 2>&1 >/dev/null)
+  apre_rc=$?
+  if [ "$apre_rc" -ne 0 ] && [ "$apre_rc" -ne 3 ]; then
+    fail_leg "audio-notes offsite preflight failed for $OPS_AUDIO_REMOTE (auth or reachability); rclone said: $apre_err" "audio-notes"
+    return 1
+  fi
+
+  local acopy_out acopy_rc
+  acopy_out=$(rclone copy "$src" "$OPS_AUDIO_REMOTE/current" \
+        --backup-dir "$OPS_AUDIO_REMOTE/replaced/$STAMP" \
+        "${AUDIO_FILTER[@]}" --transfers 4 --timeout 30m 2>&1)
+  acopy_rc=$?
+  [ -n "$acopy_out" ] && printf '%s\n' "$acopy_out" | tail -3
+  if [ "$acopy_rc" -ne 0 ]; then
+    fail_leg "rclone copy of audio-notes to $OPS_AUDIO_REMOTE (rc=$acopy_rc)" "audio-notes"
+    return 1
+  fi
+  echo "ops-snapshot: pushed audio-notes to $OPS_AUDIO_REMOTE/current at $TS"
+
+  local acheck_out acheck_rc
+  acheck_out=$(rclone check --one-way --size-only "${AUDIO_FILTER[@]}" "$src" "$OPS_AUDIO_REMOTE/current" 2>&1)
+  acheck_rc=$?
+  if [ "$acheck_rc" -ne 0 ]; then
+    local acopy2_out acopy2_rc
+    acopy2_out=$(rclone copy "$src" "$OPS_AUDIO_REMOTE/current" \
+          --backup-dir "$OPS_AUDIO_REMOTE/replaced/$STAMP" \
+          "${AUDIO_FILTER[@]}" --transfers 4 --timeout 30m 2>&1)
+    acopy2_rc=$?
+    [ -n "$acopy2_out" ] && printf '%s\n' "$acopy2_out" | tail -3
+    if [ "$acopy2_rc" -ne 0 ]; then
+      fail_leg "rclone copy of audio-notes to $OPS_AUDIO_REMOTE (rc=$acopy2_rc, retry after failed check)" "audio-notes"
+      return 1
+    fi
+    local acheck2_out acheck2_rc acheck2_filtered
+    acheck2_out=$(rclone check --one-way --size-only "${AUDIO_FILTER[@]}" "$src" "$OPS_AUDIO_REMOTE/current" 2>&1)
+    acheck2_rc=$?
+    if [ "$acheck2_rc" -ne 0 ]; then
+      acheck2_filtered=$(printf '%s\n' "$acheck2_out" | grep -v 'No common hash found')
+      [ -n "$acheck2_filtered" ] && printf '%s\n' "$acheck2_filtered" | grep -E 'ERROR|NOTICE' | tail -20
+      fail_leg "rclone check found differences between $src and $OPS_AUDIO_REMOTE/current after one retry (rc=$acheck2_rc)" "audio-notes"
+      return 1
+    fi
+    echo "ops-snapshot: verified audio-notes matches $OPS_AUDIO_REMOTE/current at $TS (after one retry)"
+  else
+    echo "ops-snapshot: verified audio-notes matches $OPS_AUDIO_REMOTE/current at $TS"
+  fi
+
+  local asize_json afiles abytes
+  asize_json=$(rclone size ${AUDIO_FILTER[@]+"${AUDIO_FILTER[@]}"} "$src" --json 2>/dev/null)
+  afiles=$(printf '%s' "$asize_json" | sed -n 's/.*"count":\([0-9]*\).*/\1/p')
+  abytes=$(printf '%s' "$asize_json" | sed -n 's/.*"bytes":\([0-9]*\).*/\1/p')
+  mkdir -p "$(dirname "$OPS_AUDIO_MARKER")" \
+    || { fail_leg "cannot create $(dirname "$OPS_AUDIO_MARKER")" "audio-notes"; return 1; }
+  printf '{"lane":"audio-notes","last_ok":"%s","files":%s,"bytes":%s,"offsite":true}\n' \
+    "$(date -Iseconds)" "${afiles:-0}" "${abytes:-0}" > "$OPS_AUDIO_MARKER" \
+    || { fail_leg "cannot write $OPS_AUDIO_MARKER" "audio-notes"; return 1; }
+  chmod 600 "$OPS_AUDIO_MARKER" 2>/dev/null
+  return 0
+}
+
+if [ "$OPS_AUDIO_OFFSITE" = "1" ]; then
+  run_audio_leg || LEGS_FAILED=$((LEGS_FAILED + 1))
+else
+  echo "ops-snapshot: audio-notes offsite disabled (OPS_AUDIO_OFFSITE=0)"
+fi
+
+# S3: exit nonzero at the very end if either independent leg failed, even though
+# neither one called exit itself and even if the other leg (or the ops-vault/
+# claude-memory legs above) printed its own success messaging along the way.
+[ "$LEGS_FAILED" -eq 0 ] || exit 1
