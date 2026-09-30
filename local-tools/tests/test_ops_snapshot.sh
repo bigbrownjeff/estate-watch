@@ -194,7 +194,10 @@ run_snap() {  # env vars set by caller (OPS_VAULT, OPS_REMOTE, OPS_MEMORY_REMOTE
   # OPS_MARKER ($HOME/data-vaults/ops-vault/last-ok.json) can never resolve
   # into the real $HOME. OPS_HOME defaults to the fixture too, unless a
   # caller overrides it (T6's missing-directory fixtures).
+  # The secrets and audio legs stay off unless a test turns them on, so the
+  # older tests keep exercising only the legs they were written for.
   OPS_HOME="${OPS_HOME:-$FAKE_HOME}" HOME="$FAKE_HOME" RCLONE_CONFIG="$RCONF" OPS_NO_FAILTASK=1 \
+    OPS_SECRETS_OFFSITE="${OPS_SECRETS_OFFSITE:-0}" OPS_AUDIO_OFFSITE="${OPS_AUDIO_OFFSITE:-0}" \
     /bin/bash "$SUBJECT" "$@" 2>&1
 }
 
