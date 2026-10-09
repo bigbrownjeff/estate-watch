@@ -407,6 +407,27 @@ def reopen(gh_bin, gh_item, rec):
             gh_item["content"] = content
     return True
 
+REF_TRIES = 3
+REF_BACKOFF_S = (2, 5)
+
+def assign_ref(item_id):
+    """board-ref assign with up to REF_TRIES attempts; a failed assign leaves a
+    Ref-less card, so transient errors are retried before giving up loudly."""
+    last = ""
+    for attempt in range(1, REF_TRIES + 1):
+        try:
+            r = subprocess.run(["/Users/jeffpinto/.claude/bin/board-ref", "assign", item_id],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode == 0:
+                return True
+            last = r.stderr.strip()[:200]
+        except Exception as e:
+            last = "error: %s" % e
+        if attempt < REF_TRIES:
+            time.sleep(REF_BACKOFF_S[min(attempt - 1, len(REF_BACKOFF_S) - 1)])
+    log("board-ref assign failed after %d tries (item exists anyway): %s" % (REF_TRIES, last))
+    return False
+
 def create_issue_and_add(gh_bin, title, body):
     """(item_id, content_type) via gh issue create --repo BOARD_REPO + project
     item-add, or (None, None) on total failure. Falls back LOUDLY to the old
@@ -513,13 +534,7 @@ def board_create(gh_bin, rec, items, tax):
     if DRYRUN:
         log("DRY-RUN would run: board-ref assign %s" % item_id)
     else:
-        try:
-            r = subprocess.run(["/Users/jeffpinto/.claude/bin/board-ref", "assign", item_id],
-                               capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                log("board-ref assign failed (item exists anyway): %s" % r.stderr.strip()[:200])
-        except Exception as e:
-            log("board-ref assign error: %s" % e)
+        assign_ref(item_id)
     # so later records — same invocation AND other processes via the cache — dedupe against it
     if not DRYRUN:
         items.append({"status": "Todo",
