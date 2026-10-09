@@ -20,6 +20,7 @@ import re
 import ssl
 import subprocess
 import sys
+import time
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -495,7 +496,15 @@ def confirm_nxdomain(host: str) -> bool | None:
 
 def probe_url(url: str, timeout: float = 20.0,
               required_body_pattern: str | None = None,
-              forbidden_body_pattern: str | None = None) -> dict[str, Any]:
+              forbidden_body_pattern: str | None = None,
+              extra_headers: dict[str, str] | None = None,
+              cache_bust: bool = False) -> dict[str, Any]:
+    if cache_bust:
+        # Unique query per request so a cached edge 200 can never stand in for
+        # the live gate decision (fast-lane doctrine: posture probes are busted).
+        parts = urllib.parse.urlsplit(url)
+        query = (parts.query + "&" if parts.query else "") + f"_cb={time.time_ns()}"
+        url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
     redirects = RecordingRedirectHandler()
     opener = urllib.request.build_opener(redirects, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
     req = urllib.request.Request(
@@ -506,6 +515,7 @@ def probe_url(url: str, timeout: float = 20.0,
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 estate-watch-drift/1.1"),
             "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+            **(extra_headers or {}),
         },
     )
     body_match = None
@@ -605,22 +615,56 @@ def evaluate_url(check: dict[str, Any], probe: dict[str, Any]) -> dict[str, Any]
             okay = False
     elif expect in {"gated", "paused"}:
         gate_hosts = {h.lower() for h in check.get("allowed_redirect_hosts", [])}
-        explicit_gate = status in {401, 403}
-        redirected_to_gate = bool(gate_hosts & redirect_hosts) or final_host in gate_hosts
-        access_header_evidence = any(
-            name.lower().startswith("cf-access-")
-            for name in probe.get("response_header_names", [])
-        )
-        if gate_hosts:
-            # A generic origin/bot 401 or 403 is not proof that the declared
-            # Cloudflare Access policy is present. Require the exact Access host
-            # in the redirect/final chain or an Access-specific response header.
-            okay = okay and (redirected_to_gate or access_header_evidence)
-        else:
-            okay = okay and explicit_gate
-        detail += " gate_evidence=" + (
-            "host" if redirected_to_gate else "header" if access_header_evidence else "missing"
-        )
+
+        def gate_verdict(label: str, pr: dict[str, Any]) -> tuple[bool, str]:
+            st = int(pr["status"])
+            fin = (urllib.parse.urlparse(pr["final_url"]).hostname or "").lower()
+            hops = {
+                (urllib.parse.urlparse(i["to"]).hostname or "").lower()
+                for i in pr.get("redirects", [])
+            }
+            ok = st in allowed
+            explicit = st in {401, 403}
+            redirected = bool(gate_hosts & hops) or fin in gate_hosts
+            header_ev = any(
+                n.lower().startswith("cf-access-")
+                for n in pr.get("response_header_names", []))
+            if gate_hosts:
+                # A generic origin/bot 401 or 403 is not proof that the declared
+                # Cloudflare Access policy is present. Require the exact Access host
+                # in the redirect/final chain or an Access-specific response header.
+                ok = ok and (redirected or header_ev)
+            else:
+                ok = ok and explicit
+            note = "host" if redirected else "header" if header_ev else "missing"
+            if st == 200:
+                # Content served on a gated row: forbidden text is a leak, and a
+                # missing required marker off the gate host is the wrong page.
+                if check.get("forbidden_body_pattern") and pr.get("forbidden_body_match"):
+                    ok = False
+                    note += " FORBIDDEN_BODY_SERVED"
+                if (check.get("required_body_pattern") and fin not in gate_hosts
+                        and pr.get("body_match") is not True):
+                    ok = False
+                    note += " REQUIRED_BODY_MISSING"
+            return ok, f"{label}={st:03d}/{note}"
+
+        okay_anon, note_anon = gate_verdict("gate_evidence", probe)
+        okay = okay and okay_anon
+        detail += " " + note_anon
+        forged = probe.get("forged")
+        if forged is not None:
+            okay_forged, note_forged = gate_verdict("forged_jwt", forged)
+            okay = okay and okay_forged
+            detail += " " + note_forged
+            sanitized_probe["forged"] = {
+                **forged,
+                "final_url": safe_url(forged["final_url"]),
+                "redirects": [
+                    {**i, "from": safe_url(i["from"]), "to": safe_url(i["to"])}
+                    for i in forged.get("redirects", [])
+                ],
+            }
     elif expect in {"unpublished", "retired"}:
         # A planned/unpublished or retired surface unexpectedly becoming reachable
         # is state drift. Keep the labels distinct so a never-launched proof is not
@@ -630,6 +674,26 @@ def evaluate_url(check: dict[str, Any], probe: dict[str, Any]) -> dict[str, Any]
         return result(check, "FAIL", f"unknown URL expectation: {expect}")
 
     return result(check, "PASS" if okay else "FAIL", detail, probe=sanitized_probe)
+
+
+FORGED_ACCESS_HEADERS = {"Cf-Access-Jwt-Assertion": "x"}
+
+
+def probe_gated(check: dict[str, Any]) -> dict[str, Any]:
+    """Anonymous probe plus a forged-JWT probe, both cache-busted.
+
+    The forged request is stored under probe["forged"]. A gate that only holds
+    for header-less clients (fail-open middleware) shows up as the forged probe
+    failing the same gate evidence, or serving forbidden/real content.
+    """
+    timeout = float(check.get("timeout", 20))
+    req_pat = check.get("required_body_pattern")
+    forb_pat = check.get("forbidden_body_pattern")
+    probe = probe_url(check["url"], timeout, req_pat, forb_pat, cache_bust=True)
+    probe["forged"] = probe_url(
+        check["url"], timeout, req_pat, forb_pat,
+        extra_headers=FORGED_ACCESS_HEADERS, cache_bust=True)
+    return probe
 
 
 def run_check(check: dict[str, Any], network: bool = False) -> dict[str, Any]:
@@ -647,6 +711,8 @@ def run_check(check: dict[str, Any], network: bool = False) -> dict[str, Any]:
     if check["type"] == "url":
         if not network:
             return result(check, "SKIP", "network disabled; rerun with --network")
+        if check.get("expect") in {"gated", "paused"}:
+            return evaluate_url(check, probe_gated(check))
         return evaluate_url(check, probe_url(
             check["url"], float(check.get("timeout", 20)),
             check.get("required_body_pattern"),
