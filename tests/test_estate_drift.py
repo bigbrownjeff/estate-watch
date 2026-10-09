@@ -392,6 +392,69 @@ class UrlSemanticsTest(unittest.TestCase):
         self.assertEqual("FAIL", estate_drift.evaluate_url(check, generic_denial)["state"])
         self.assertEqual("PASS", estate_drift.evaluate_url(check, access_denial)["state"])
 
+    def _gate_pair(self, forged_status=200, forged_body=False, anon_body=False):
+        gate = "https://access.example.test/login"
+        hop = [{"status": 302, "from": "https://app.example.test/", "to": gate}]
+        base = {"verified": "2026-10-09", "error": "", "forbidden_body_match": anon_body,
+                "body_match": True}
+        anon = {**base, "status": 200, "final_url": gate, "redirects": hop}
+        forged = {**base, "status": forged_status, "forbidden_body_match": forged_body,
+                  "final_url": gate if forged_status != 200 or not forged_body else "https://app.example.test/",
+                  "redirects": hop if forged_status != 200 or not forged_body else []}
+        anon["forged"] = forged
+        return anon
+
+    def _gate_check(self):
+        return {"id": "g", "type": "url", "url": "https://app.example.test/", "expect": "gated",
+                "allowed_status": [200, 401, 403],
+                "allowed_redirect_hosts": ["access.example.test"],
+                "forbidden_body_pattern": "SECRET"}
+
+    def test_gated_passes_when_anon_and_forged_both_bounce(self):
+        out = estate_drift.evaluate_url(self._gate_check(), self._gate_pair())
+        self.assertEqual("PASS", out["state"])
+        self.assertIn("forged_jwt=200", out["detail"])
+
+    def test_gated_fails_when_forged_jwt_is_served_forbidden_content(self):
+        out = estate_drift.evaluate_url(
+            self._gate_check(), self._gate_pair(forged_status=200, forged_body=True))
+        self.assertEqual("FAIL", out["state"])
+        self.assertIn("FORBIDDEN_BODY_SERVED", out["detail"])
+
+    def test_gated_fails_when_anonymous_probe_is_served_forbidden_content(self):
+        pair = self._gate_pair(anon_body=True)
+        self.assertEqual("FAIL", estate_drift.evaluate_url(self._gate_check(), pair)["state"])
+
+    def test_gated_fails_when_forged_probe_loses_gate_evidence(self):
+        pair = self._gate_pair()
+        pair["forged"] = {**pair["forged"], "final_url": "https://app.example.test/",
+                          "redirects": [], "status": 200}
+        self.assertEqual("FAIL", estate_drift.evaluate_url(self._gate_check(), pair)["state"])
+
+    def test_cache_bust_and_forged_header_reach_the_request(self):
+        seen = []
+
+        class Boom(Exception):
+            pass
+
+        class FakeOpener:
+            def open(self, req, timeout=0):
+                seen.append((req.full_url, dict(req.header_items())))
+                raise Boom()
+
+        orig = estate_drift.urllib.request.build_opener
+        estate_drift.urllib.request.build_opener = lambda *a, **k: FakeOpener()
+        try:
+            with self.assertRaises(Boom):
+                estate_drift.probe_url("https://x.example.test/p?a=1",
+                                       extra_headers=estate_drift.FORGED_ACCESS_HEADERS,
+                                       cache_bust=True)
+        finally:
+            estate_drift.urllib.request.build_opener = orig
+        url, headers = seen[0]
+        self.assertIn("a=1&_cb=", url)
+        self.assertEqual("x", headers.get("Cf-access-jwt-assertion"))
+
     def test_retired_surface_resurrection_fails(self):
         check = {"id": "retired", "type": "url", "expect": "retired", "allowed_status": [404, 410]}
         probe = {"status": 200, "final_url": "https://old.example.test/", "redirects": [], "verified": "2026-08-06", "error": ""}
