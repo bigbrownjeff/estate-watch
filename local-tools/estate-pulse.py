@@ -30,7 +30,7 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HOME = os.path.expanduser("~")
 FAILDIR = os.path.join(HOME, ".claude", "failures")
@@ -735,6 +735,73 @@ def write_heartbeat(cfg, state, online, mode):
     return hb
 
 
+# Backup lanes whose calendar slot a sleeping Mac skipped (launchd does not
+# coalesce missed StartCalendarInterval slots at wake; creak ledger 48, board
+# #1935). Overridable with "catchup_labels" in the sentinel config.
+CATCHUP_DEFAULT = [
+    "com.jeffpinto.ops-snapshot", "com.jeffpinto.crm-backup",
+    "com.jeffpinto.family-archive-snapshot", "com.jeffpinto.notes-vault-snapshot",
+    "com.jeffpinto.bcc-crm-d1-snapshot", "com.jeffpinto.photo-atlas-snapshot",
+    "com.jeffpinto.music-atlas-snapshot", "com.jeffpinto.lantern-data-snapshot",
+    "com.jeffpinto.lantern-cloud-backup",
+]
+
+
+def last_slot(slots, now):
+    """Most recent scheduled time <= now for a list of calendar dicts (Hour,
+    Minute, optional Weekday 0/7=Sunday, Day, Month); None if none in 40 days."""
+    best = None
+    for back in range(0, 40):
+        day = now - timedelta(days=back)
+        for sl in slots:
+            if "Hour" not in sl:
+                continue
+            wd = sl.get("Weekday")
+            if wd is not None and (day.isoweekday() % 7) != (int(wd) % 7):
+                continue
+            if "Day" in sl and day.day != int(sl["Day"]):
+                continue
+            if "Month" in sl and day.month != int(sl["Month"]):
+                continue
+            t = day.replace(hour=int(sl["Hour"]), minute=int(sl.get("Minute", 0)),
+                            second=0, microsecond=0)
+            if t <= now and (best is None or t > best):
+                best = t
+    return best
+
+
+def check_missed_slots(cfg, state):
+    import plistlib
+    seen = state.setdefault("catchup", {})
+    now = datetime.now()
+    for label in cfg.get("catchup_labels", CATCHUP_DEFAULT):
+        plist = os.path.join(HOME, "Library", "LaunchAgents", label + ".plist")
+        try:
+            with open(plist, "rb") as f:
+                d = plistlib.load(f)
+        except Exception:
+            continue
+        cal = d.get("StartCalendarInterval")
+        slots = cal if isinstance(cal, list) else [cal] if isinstance(cal, dict) else []
+        slot = last_slot(slots, now)
+        if slot is None or now - slot < timedelta(minutes=20):
+            continue
+        logs = [d.get("StandardOutPath"), d.get("StandardErrorPath")]
+        mt = [os.path.getmtime(x) for x in logs if x and os.path.exists(x)]
+        if not mt or datetime.fromtimestamp(max(mt)) >= slot:
+            continue   # no log to judge by, or it ran at/after the slot
+        key = slot.isoformat()
+        if seen.get(label) == key:
+            continue   # already kicked for this slot
+        if DRYRUN:
+            plog("  WOULD catch-up kickstart %s (slot %s missed)" % (label, key))
+            continue
+        subprocess.run(["/bin/launchctl", "kickstart", "gui/%d/%s" % (UID, label)],
+                       capture_output=True, timeout=30, check=False)
+        seen[label] = key
+        plog("CHECK D: catch-up kickstart %s (slot %s missed while asleep)" % (label, key))
+
+
 def main():
     os.makedirs(FAILDIR, exist_ok=True)
     cfg = load_json(CONFIG, {})
@@ -749,6 +816,7 @@ def main():
             check_launchd_exits(cfg)
             state = check_loops(cfg, state)
             check_stale_prs(cfg)
+            check_missed_slots(cfg, state)
         else:
             # the 08:00 failure mode: do NOT relaunch a loop into a dead network, and
             # do NOT file 6 per-job cards — handle_network already logged one outage event.
