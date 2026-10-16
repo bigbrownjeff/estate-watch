@@ -79,7 +79,7 @@ BINARY_EXTS = {".pdf", ".docx", ".pptx", ".xlsx", ".csv"}
 ALL_EXTS = TEXT_EXTS | BINARY_EXTS
 
 SKIP_DIR_NAMES = {".git", "node_modules", "__pycache__"}
-SKIP_PATH_SEGMENTS = ("/_wt/", "/.claude/worktrees/")
+SKIP_PATH_SEGMENTS = ("/_wt/", "/.claude/worktrees/", "/ladder/runs/")
 SCAN_MARKERS = ("/docs/deliverables/", "/workups/", "/pitches/")
 
 FAILTASK = os.path.expanduser("~/.claude/bin/failtask")

@@ -158,7 +158,7 @@ def handoff_files(days):
     cutoff = time.time() - days * 86400
     roots = [os.path.join(HOME, "Projects"), os.path.join(HOME, ".claude", "handoffs")]
     skip = ("/_wt/", "/.worktrees/", "/_worktrees/", "-wt/", "-worktrees/", "/.wt/",
-            "/.claude/worktrees/", "/node_modules/")
+            "/.claude/worktrees/", "/node_modules/", "/ladder/runs/")
     out = []
     for root in roots:
         for dirpath, dirnames, filenames in os.walk(root):
