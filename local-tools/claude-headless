@@ -1,0 +1,22 @@
+#!/bin/bash
+# Headless Claude launcher for launchd jobs.
+# Prefers a long-lived token (claude setup-token) over the interactive login,
+# so scheduled jobs survive login expiry. Loud fallback, never silent.
+#
+# One-time setup per account: run `claude setup-token`, then put the token in
+#   ~/.claude/secrets/claude-headless.env   as: CLAUDE_CODE_OAUTH_TOKEN=<token>
+# A job can point at a different account's env via CLAUDE_HEADLESS_ENV=<path>.
+ENV_FILE="${CLAUDE_HEADLESS_ENV:-$HOME/.claude/secrets/claude-headless.env}"
+if [ -f "$ENV_FILE" ]; then
+  set -a; . "$ENV_FILE"; set +a
+fi
+if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+  echo "claude-headless: NO long-lived token ($ENV_FILE absent/empty); depending on interactive login state — run 'claude setup-token' to fix durably" >&2
+fi
+# Pin a model unless the caller chose one. The ~/.claude profile defaults to
+# Fable, which scheduled jobs must never spend (RULE #1); on 2026-10-16 the
+# bundle daily died "out of usage credits" because it inherited that default.
+case " $* " in
+  *" --model "*|*" --model="*) exec "$HOME/.local/bin/claude" "$@" ;;
+  *) exec "$HOME/.local/bin/claude" --model "${CLAUDE_HEADLESS_MODEL:-opus}" "$@" ;;
+esac
