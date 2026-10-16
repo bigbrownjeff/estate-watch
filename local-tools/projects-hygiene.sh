@@ -39,7 +39,8 @@ facts=$("$HOME/.claude/bin/projects-hygiene-facts.sh" 2>/dev/null)
     handoff_files=$( { find "$HOME/Projects" -path '*/.claude/handoffs/*.md' \
                          -not -path '*/_wt/*' -not -path '*/.worktrees/*' \
                          -not -path '*/_worktrees/*' -not -path '*-wt/*' \
-                         -not -path '*-worktrees/*' -not -path '*/.wt/*' 2>/dev/null; \
+                         -not -path '*-worktrees/*' -not -path '*/.wt/*' \
+                         -not -path '*/ladder/runs/*' 2>/dev/null; \
                        find "$HOME/.claude/handoffs" -name '*.md' 2>/dev/null; } )
     expected=$(echo "$handoff_files" | sed 's|.*/||; s|\.md$||; s|^|session-|' | sort -u)
     # Same filename in two repos collapses to one expected id; list those stems
@@ -117,7 +118,7 @@ no_remote=$(echo "$facts" | awk -F'|' '$8=="no-upstream"' | wc -l | tr -d ' ')
   thread_pattern='owed|unsent|promised|follow-?up|awaiting|not yet sent|waiting on'
   handoff_files=$( { find "$HOME/Projects" -path '*/.claude/handoffs/*.md' -mtime -14 \
                         -not -path '*/_wt/*' -not -path '*worktrees*' \
-                        -not -path '*/notes-vault/data/*' 2>/dev/null; \
+                        -not -path '*/notes-vault/data/*' -not -path '*/ladder/runs/*' 2>/dev/null; \
                       find "$HOME/.claude/handoffs" -name '*.md' -mtime -14 2>/dev/null; } | sort -u )
   found_any=0
   if [ -n "$handoff_files" ]; then
