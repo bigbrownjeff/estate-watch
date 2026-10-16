@@ -16,7 +16,20 @@ fi
 # Pin a model unless the caller chose one. The ~/.claude profile defaults to
 # Fable, which scheduled jobs must never spend (RULE #1); on 2026-10-16 the
 # bundle daily died "out of usage credits" because it inherited that default.
-case " $* " in
-  *" --model "*|*" --model="*) exec "$HOME/.local/bin/claude" "$@" ;;
-  *) exec "$HOME/.local/bin/claude" --model "${CLAUDE_HEADLESS_MODEL:-opus}" "$@" ;;
+# Scheduled jobs and routines are not authorized for Fable at all (Jeff
+# 2026-10-16). Read only the model argument, never the prompt text.
+want="${CLAUDE_HEADLESS_MODEL:-opus}"; prev=""; has_model=0
+for a in "$@"; do
+  case "$a" in --model=*) want="${a#--model=}"; has_model=1 ;; esac
+  [ "$prev" = "--model" ] && { want="$a"; has_model=1; }
+  prev="$a"
+done
+case "$want" in
+  *[Ff]able*)
+    echo "claude-headless: REFUSED model '$want', Fable is not authorized for scheduled jobs (Jeff 2026-10-16)" >&2
+    exit 64 ;;
 esac
+if [ "$has_model" = 1 ]; then
+  exec "$HOME/.local/bin/claude" "$@"
+fi
+exec "$HOME/.local/bin/claude" --model "$want" "$@"
