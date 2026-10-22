@@ -135,6 +135,8 @@ def test_a_reopen_issue_posts_comment_not_body_edit():
     check("a: zero item-edit --body calls", len(body_edit_calls) == 0, str(calls))
     check("a: status flip still requested", any("item-edit" in c and "--single-select-option-id" in c for c in calls))
     check("a: gh_item.status flips to Todo", gh_item["status"] == "Todo")
+    reopen_calls = [c for c in calls if "PATCH" in c and "repos/bigbrownjeff/board/issues/42" in c and "state=open" in c]
+    check("a: exactly one REST PATCH state=open on the issue", len(reopen_calls) == 1, str(calls))
 
 
 # ---------------------------------------------------------------- (b)
