@@ -388,6 +388,21 @@ def reopen(gh_bin, gh_item, rec):
             if not post_comment(gh_bin, content, stamp):
                 log("reopen comment failed for issue %s — Status will still be flipped"
                     % (content.get("number") or gh_item.get("id")))
+            # The issue itself must come back to state=open: flipping only the
+            # project Status leaves `gh issue list --state open` (every walk,
+            # the inbox hook, the sweeps) blind to the recurrence. 2026-10-22:
+            # card 668 recurred twice (09-23, 10-21) as comments on a CLOSED
+            # issue that no open-card listing ever showed.
+            number = content.get("number")
+            if number:
+                m = ISSUE_URL_RE.match(content.get("url") or "")
+                repo = m.group(1) if m else BOARD_REPO
+                r = gh_write(gh_bin, ["api", "-X", "PATCH",
+                                      "repos/%s/issues/%s" % (repo, number),
+                                      "-f", "state=open"])
+                if r.returncode != 0:
+                    log("reopen issue state failed for #%s: %s"
+                        % (number, r.stderr.strip()[:200]))
         else:
             log("reopen: item %s has unknown content type %r — Status flipped, no stamp"
                 % (gh_item.get("id"), content_type))
