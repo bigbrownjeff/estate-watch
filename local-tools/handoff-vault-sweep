@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""handoff-vault-sweep: log every handoff under ~/Projects/*/.claude/handoffs and
+~/.claude/handoffs that has no Notes Vault session note (source_app=session,
+source_id=session-<stem>), the gap the weekly projects-hygiene report prints as
+"handoff(s) with no vault session note". Mechanical summary: the H1 plus the
+first prose paragraphs (<=600 chars) through notes-vault/bin/log-session.sh; the
+handoff file stays the record. Two repos sharing a filename with different
+content are skipped and listed (log them by hand with a repo-suffixed id).
+Dry run by default; --apply writes; --limit N caps the run.
+First run 2026-10-26: 204 missing, 200 logged in three minutes."""
+import os,re,sys,glob,sqlite3,subprocess,collections
+HOME=os.path.expanduser('~'); APPLY='--apply' in sys.argv
+LIM=int(sys.argv[sys.argv.index('--limit')+1]) if '--limit' in sys.argv else 10**9
+EXCL=('/_wt/','/.worktrees/','/_worktrees/','-wt/','-worktrees/','/.wt/','/ladder/runs/')
+files=[f for f in glob.glob(HOME+'/Projects/**/.claude/handoffs/*.md',recursive=True) if not any(x in f for x in EXCL)]
+files+=glob.glob(HOME+'/.claude/handoffs/*.md')
+by=collections.defaultdict(list)
+for f in files: by[os.path.basename(f)[:-3]].append(f)
+db=sqlite3.connect(HOME+'/Projects/notes-vault/data/notes.db')
+logged={r[0] for r in db.execute("SELECT source_id FROM notes WHERE source_app='session'")}
+todo=sorted(s for s in by if 'session-'+s not in logged)
+amb=[s for s in todo if len({subprocess.run(['md5','-q',f],capture_output=True,text=True).stdout for f in by[s]})>1]
+print(f"missing {len(todo)}, ambiguous (skipped) {len(amb)}: {amb}")
+n=0
+for stem in todo:
+    if stem in amb: continue
+    f=sorted(by[stem])[0]
+    proj=f.split('/Projects/')[1].split('/')[0] if '/Projects/' in f else 'estate'
+    txt=open(f,errors='replace').read()
+    m=re.search(r'^#\s+(.+)$',txt,re.M); h1=m.group(1).strip() if m else stem
+    body=re.sub(r'^#.*$','',txt,flags=re.M); body=re.sub(r'^\s*[-*]\s+','',body,flags=re.M)
+    paras=[p.strip().replace('\n',' ') for p in re.split(r'\n\s*\n',body) if p.strip() and not p.strip().startswith(('```','|','<'))]
+    summ=' '.join(paras)[:600].rsplit(' ',1)[0] if paras else h1
+    summ+=f"\n\n(Summary extracted mechanically by handoff-vault-sweep; the handoff file is the record.)"
+    dm=re.match(r'(\d{4}-\d{2}-\d{2})',stem); date=dm.group(1) if dm else ''
+    title=f"Session: {proj} {h1}"[:140] if date in h1 else f"Session: {proj} {h1} ({date})"[:140]
+    args=[HOME+'/Projects/notes-vault/bin/log-session.sh',title,f"{proj},session",'session-'+stem,os.path.dirname(os.path.dirname(os.path.dirname(f))),f]
+    n+=1
+    if n>LIM: break
+    if APPLY:
+        r=subprocess.run(args,input=summ,capture_output=True,text=True); print(stem,'->',(r.stdout+r.stderr).strip().splitlines()[-1][:120])
+    else: print('DRY',stem,'|',title[:90],'|',summ[:120].replace('\n',' '))

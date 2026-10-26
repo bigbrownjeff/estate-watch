@@ -61,7 +61,7 @@ facts=$("$HOME/.claude/bin/projects-hygiene-facts.sh" 2>/dev/null)
     missing=$(comm -23 <(echo "$expected") <(echo "$logged") | sed '/^$/d')
     missing_n=$(echo "$missing" | sed '/^$/d' | wc -l | tr -d ' ')
     if [ "$missing_n" -gt 0 ]; then
-      echo "$missing_n handoff(s) with no vault session note (run the vault-keeper sweep):"
+      echo "$missing_n handoff(s) with no vault session note (run: handoff-vault-sweep --apply):"
       echo "$missing" | head -10 | sed 's/^/- /'
     else
       echo "All handoffs covered."
