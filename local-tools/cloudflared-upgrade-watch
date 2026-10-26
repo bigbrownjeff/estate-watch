@@ -1,0 +1,74 @@
+#!/bin/bash
+# cloudflared-upgrade-watch: a self-clearing daily job. Waits for Homebrew to bottle a
+# target cloudflared version, upgrades, restarts the live tunnel agents one at a time,
+# verifies every tunnel hostname answers and Cloudflare sees the new connector version,
+# then unloads and deletes its own launchd plist. Any failure files an infra card and
+# leaves the job in place so tomorrow retries. (Jeff 2026-10-26: "set a daily check ...
+# do that when it comes out then clear the check".)
+# Usage: cloudflared-upgrade-watch [TARGET_VERSION]   (default 2026.10.4)
+#        DRY_RUN=1 cloudflared-upgrade-watch           reports, upgrades nothing
+set -uo pipefail
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+target="${1:-2026.10.4}"
+label="com.jeffpinto.cloudflared-upgrade-watch"
+plist="$HOME/Library/LaunchAgents/$label.plist"
+tunnels="atlas notes-vault bluecamel agent-lab"   # lantern and photos are disabled by ruling
+failtask="$HOME/.claude/bin/failtask"
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+ge() { python3 -c 'import sys; a,b=[tuple(int(x) for x in v.split(".")) for v in sys.argv[1:3]]; sys.exit(0 if a>=b else 1)' "$1" "$2"; }
+fail() {
+  log "FAIL: $*"
+  [ -x "$failtask" ] && "$failtask" infra "cloudflared upgrade watch failed" --detail "$*" --dedupe-key cloudflared-upgrade-watch
+  exit 1
+}
+clear_self() {
+  log "target $target installed and verified; clearing the daily check"
+  rm -f "$plist"
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true   # terminates this run; nothing follows
+  exit 0
+}
+
+installed="$(cloudflared --version 2>/dev/null | awk '{print $3}')"
+[ -n "$installed" ] || fail "cloudflared not found on PATH"
+log "installed $installed, target $target"
+if ge "$installed" "$target"; then
+  [ "${DRY_RUN:-0}" = 1 ] && { log "DRY_RUN: would clear self"; exit 0; }
+  clear_self
+fi
+
+brew update -q >/dev/null 2>&1 || log "brew update failed; using cached formula data"
+stable="$(brew info --json=v2 cloudflared 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["formulae"][0]["versions"]["stable"])')"
+[ -n "$stable" ] || fail "could not read Homebrew stable version for cloudflared"
+if ! ge "$stable" "$target"; then
+  log "Homebrew stable is $stable, below $target; nothing to do until the bottle lands"
+  exit 0
+fi
+[ "${DRY_RUN:-0}" = 1 ] && { log "DRY_RUN: would upgrade to $stable and restart: $tunnels"; exit 0; }
+
+log "Homebrew has $stable; upgrading"
+brew upgrade cloudflared >/dev/null 2>&1 || fail "brew upgrade cloudflared exited nonzero"
+now="$(cloudflared --version | awk '{print $3}')"
+ge "$now" "$target" || fail "after brew upgrade the binary reports $now, below $target"
+log "binary now $now; restarting tunnels one at a time"
+
+for t in $tunnels; do
+  launchctl kickstart -k "gui/$(id -u)/com.jeffpinto.$t-tunnel" || fail "kickstart of $t-tunnel exited nonzero"
+  sleep 5
+done
+sleep 10
+
+bad=""
+for t in $tunnels; do
+  for h in $(grep -h 'hostname:' "$HOME/.cloudflared/$t.yml" | awk '{print $NF}'); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://$h/")"
+    case "$code" in 2*|3*) log "ok   $h -> $code" ;; *) log "BAD  $h -> $code"; bad="$bad $h" ;; esac
+  done
+  seen="$(cloudflared tunnel info "$t" 2>/dev/null | grep -oE '[0-9]{4}\.[0-9]+\.[0-9]+' | sort -u | tr '\n' ' ')"
+  case " $seen" in *" $now "*) log "ok   connector $t at $now" ;; *) log "BAD  connector $t reports '$seen'"; bad="$bad $t:connector" ;; esac
+done
+[ -z "$bad" ] || fail "upgraded to $now but verification failed:$bad"
+
+clear_self

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.jeffpinto.cloudflared-upgrade-watch</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/jeffpinto/.claude/bin/runlog</string><string>--tag</string><string>cloudflared-upgrade-watch</string>
+    <string>/bin/bash</string><string>/Users/jeffpinto/.claude/bin/cloudflared-upgrade-watch</string><string>2026.10.4</string>
+  </array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>20</integer></dict>
+  <key>StandardOutPath</key><string>/Users/jeffpinto/.claude/logs/cloudflared-upgrade-watch.log</string>
+  <key>StandardErrorPath</key><string>/Users/jeffpinto/.claude/logs/cloudflared-upgrade-watch.err</string>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/jeffpinto</string></dict>
+</dict></plist>
