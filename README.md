@@ -51,6 +51,13 @@ the file; ollama's is `max_bytes` 64 MB, `keep` 6 generations. `com.jeffpinto.lo
 (launchd/com.jeffpinto.log-rotate.plist) runs it with `--apply` daily; `--dry-run` is the
 default with no flags and writes nothing.
 
+`local-tools/cloudflared-upgrade-watch` is a self-clearing daily job (`launchd/com.jeffpinto.cloudflared-upgrade-watch.plist`,
+07:20): it waits for Homebrew to bottle the target cloudflared version named in the plist, upgrades, restarts the
+four live tunnel agents one at a time, verifies every tunnel hostname answers and that Cloudflare reports the new
+connector version, then removes its own plist and boots itself out. A failure files an `infra` card and leaves the
+job to retry tomorrow. `DRY_RUN=1` reports and changes nothing. To watch for the next release, copy the plist back
+into `~/Library/LaunchAgents` with the new target and `launchctl bootstrap gui/501` it.
+
 `local-tools/interpreter-lint.py` fails on any `~/Library/LaunchAgents/com.jeff*.plist`, or
 any script such a plist launches, that names the python.org framework python
 (`/Library/Frameworks/Python.framework`): that build exists on one machine only, and the
