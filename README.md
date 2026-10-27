@@ -51,6 +51,11 @@ the file; ollama's is `max_bytes` 64 MB, `keep` 6 generations. `com.jeffpinto.lo
 (launchd/com.jeffpinto.log-rotate.plist) runs it with `--apply` daily; `--dry-run` is the
 default with no flags and writes nothing.
 
+A log-recency spec in `~/.claude/failures/sentinel-config.json` may carry `launchd_label`; when that job's plist is
+absent from `~/Library/LaunchAgents` the producer was retired on purpose and fleet-sentinel skips the spec instead of
+filing "producer has silently stopped" (board#2088: the off-season MLB jobs). `local-tools/tests/test_fleet_sentinel_retired_log.sh`
+proves the skip and that unlabelled and live specs still fire.
+
 `local-tools/cloudflared-upgrade-watch` is a self-clearing daily job (`launchd/com.jeffpinto.cloudflared-upgrade-watch.plist`,
 07:20): it waits for Homebrew to bottle the target cloudflared version named in the plist, upgrades, restarts the
 four live tunnel agents one at a time, verifies every tunnel hostname answers and that Cloudflare reports the new

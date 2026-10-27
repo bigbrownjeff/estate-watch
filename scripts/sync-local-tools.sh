@@ -35,6 +35,7 @@ rows=(
   "local-tools/fleet-sentinel.sh|$HOME/.claude/bin/fleet-sentinel.sh|0755"
   "local-tools/estate-pulse.py|$HOME/.claude/bin/estate-pulse.py|0755"
   "local-tools/tests/test_heal_sweep_burn.py|$HOME/.claude/bin/tests/test_heal_sweep_burn.py|0755"
+  "local-tools/tests/test_fleet_sentinel_retired_log.sh|$HOME/.claude/bin/tests/test_fleet_sentinel_retired_log.sh|0755"
   "local-tools/phoenix-enrich.py|$HOME/.claude/bin/phoenix-enrich.py|0755"
   "local-tools/morning-digest.py|$HOME/.claude/bin/morning-digest.py|0755"
   "local-tools/worktree-janitor.py|$HOME/.claude/bin/worktree-janitor.py|0755"

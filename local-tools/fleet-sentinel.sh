@@ -164,9 +164,18 @@ def newest_mtime(path):
         return os.path.getmtime(path)
     return None
 
+agents_dir = os.path.expanduser("~/Library/LaunchAgents")
 for spec in cfg.get("logs", []):
     path = os.path.expanduser(spec["path"])
     label = spec.get("label", path)
+    # A spec may name the launchd job that writes the log. When that job's plist is
+    # gone from ~/Library/LaunchAgents the job was retired on purpose (2026-10: the
+    # MLB jobs were renamed disabled.*.plist.bak for the off-season and the sentinel
+    # kept filing "producer has silently stopped" for 5 of 14 days, board#2088).
+    # A retired producer is silence by design, not a finding.
+    job = spec.get("launchd_label")
+    if job and not os.path.exists(os.path.join(agents_dir, job + ".plist")):
+        continue
     m = newest_mtime(path)
     if m is None:
         print(f"{spec['project']}|log-missing:{os.path.basename(path)}|{label}: {path} does not exist")
