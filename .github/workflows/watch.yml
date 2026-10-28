@@ -42,8 +42,15 @@ jobs:
           # An ordinary public 200 is a failure. Optional $5 is a public marker.
           check_url () {  # $1 name  $2 url  $3 public|reachable|gated  $4 access-host  $5 marker
             body=$(mktemp)
-            probe=$(curl -sS -L --max-redirs 5 -A "Mozilla/5.0 estate-watch/1.0" -o "$body" -w "%{http_code}|%{url_effective}" -m 20 "$2?cb=$RANDOM" 2>/dev/null)
-            curl_rc=$?
+            # The step runs under `bash -e`, so a bare `probe=$(curl ...)` that
+            # times out (exit 28) aborted the whole run before `curl_rc=$?` could
+            # record it: three red runs and three emails on 2026-10-28 for three
+            # different transient 20 s timeouts, none of them an outage. The
+            # `|| curl_rc=$?` keeps the failure in-band so it is judged like any
+            # other non-2xx (DOWN, state file, flap rules), and one retry absorbs
+            # a single slow edge answer.
+            curl_rc=0
+            probe=$(curl -sS -L --max-redirs 5 --retry 1 --retry-all-errors --retry-delay 2 -A "Mozilla/5.0 estate-watch/1.0" -o "$body" -w "%{http_code}|%{url_effective}" -m 20 "$2?cb=$RANDOM" 2>/dev/null) || curl_rc=$?
             code=${probe%%|*}
             effective=${probe#*|}
             # Access login redirects carry signed query metadata. Status checks
