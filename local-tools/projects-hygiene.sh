@@ -162,8 +162,10 @@ HANDOFF_EOF
 
   echo
   echo "### Overdue jeff-owned open board cards"
-  board_json=$(mktemp)
-  if gh project item-list 1 --owner bigbrownjeff --limit 1000 --format json > "$board_json" 2>/tmp/projects-hygiene-gh-err.txt; then
+  # Read the nightly gh-board export: launchd has no gh on PATH, and a live
+  # item-list spends the GraphQL hour the export needs (creak ledger 31).
+  board_json=$(ls -d "$HOME"/data-vaults/gh-board/20*/items.json 2>/dev/null | sort | tail -1)
+  if [ -n "$board_json" ]; then
     board_lines=$(/usr/bin/python3 - "$board_json" "$run_date" <<'PY_EOF' 2>&1
 import json, sys
 path, today = sys.argv[1], sys.argv[2]
@@ -173,9 +175,14 @@ except Exception as e:
     print("CANT-TELL: gh output not valid JSON — %s" % e)
     sys.exit(0)
 items = d.get("items", [])
-print("COUNT %d" % len(items))
-if len(items) >= 1000:
-    print("CANT-TELL: item count >= 1000 — list may be truncated, raise --limit")
+export_day = path.rstrip("/").split("/")[-2]
+print("COUNT %d (export %s)" % (len(items), export_day))
+if len(items) != d.get("totalCount"):
+    print("CANT-TELL: export holds %d of totalCount %s — truncated" % (len(items), d.get("totalCount")))
+from datetime import date
+age = (date.fromisoformat(today) - date.fromisoformat(export_day)).days
+if age > 2:
+    print("CANT-TELL: newest board export is %d days old (%s)" % (age, export_day))
 rows = []
 for it in items:
     status = (it.get("status") or "").strip().lower()
@@ -213,10 +220,8 @@ PY_EOF
       fi
     fi
   else
-    gh_err=$(cat /tmp/projects-hygiene-gh-err.txt 2>/dev/null)
-    echo "CANT-TELL: gh project item-list failed — $gh_err"
+    echo "CANT-TELL: no board export under ~/data-vaults/gh-board"
   fi
-  rm -f "$board_json" /tmp/projects-hygiene-gh-err.txt
 } >> "$report" || true
 
 # --auto-safe since 2026-09-02: removes ONLY worktrees whose branch is merged,
