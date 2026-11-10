@@ -30,7 +30,7 @@
       "type": "text_absent",
       "paths": [
         "${HOME}/.claude/skills/client-workup/**/*.md",
-        "${PROJECTS}/client-pitches/.claude/skills/client-workup/**/*.md",
+        "${PROJECTS}/outbound_with_jeff_and_marv/.claude/skills/client-workup/**/*.md",
         "${PROJECTS}/outbound_with_jeff_and_marv/.claude/skills/client-workup/**/*.md"
       ],
       "patterns": ["jeffpinto-site/pitches"]
