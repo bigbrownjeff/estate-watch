@@ -816,6 +816,90 @@ def stuck_report(now=None):
 
 # ----------------------------------------------------------------------- main
 
+# ------------------------------------------------------------ pending queue
+#
+# One process drains the queue, and it takes the WHOLE file by an atomic
+# rename before it files anything. A long drain holds the board lock for
+# minutes; a caller that gives up on the lock after LOCK_WAIT_S used to read
+# the same un-rewritten queue file and file every row again (2026-11-12: 38
+# rows queued over a four-day network outage were drained by three
+# overlapping callers, three cards per row). A claim whose owner died is
+# returned to the queue by the next caller.
+
+CLAIM_RE = re.compile(r"^pending-board\.claim\.(\d+)\.jsonl$")
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True
+    return True
+
+def requeue_dead_claims():
+    try:
+        names = os.listdir(FAILDIR)
+    except Exception:
+        return
+    for name in names:
+        m = CLAIM_RE.match(name)
+        if not m or int(m.group(1)) == os.getpid() or _pid_alive(int(m.group(1))):
+            continue
+        dead = os.path.join(FAILDIR, name)
+        mine = os.path.join(FAILDIR, "pending-board.requeue.%d.jsonl" % os.getpid())
+        try:
+            os.rename(dead, mine)   # atomic: only one caller wins a dead claim
+        except OSError:
+            continue
+        try:
+            with open(mine) as f, open(PENDING, "a") as out:
+                for l in f:
+                    if l.strip():
+                        out.write(l if l.endswith("\n") else l + "\n")
+            os.remove(mine)
+            log("returned a dead drain's claim to the pending queue (%s)" % name)
+        except Exception as e:
+            log("could not requeue dead claim %s (%s); rows are in %s" % (name, e, mine))
+
+def drain_pending(gh_bin, items, tax):
+    """File every queued record once. Returns the number of rows drained."""
+    requeue_dead_claims()
+    if not os.path.exists(PENDING):
+        return 0
+    claim = os.path.join(FAILDIR, "pending-board.claim.%d.jsonl" % os.getpid())
+    try:
+        os.rename(PENDING, claim)
+    except OSError as e:
+        log("pending queue already claimed or unreadable (%s); leaving it" % e)
+        return 0
+    try:
+        with open(claim) as f:
+            queued = [json.loads(l) for l in f if l.strip()]
+    except Exception as e:
+        log("pending queue unreadable (%s); left as %s" % (e, claim))
+        return 0
+    drained, leftovers = 0, []
+    for q in queued:
+        outcome, _ = board_create(gh_bin, q, items, tax)
+        if outcome == "failed":
+            leftovers.append(q)
+            continue
+        drained += 1
+        log("drained pending [%s] %s -> %s" % (q.get("project"), q.get("title"), outcome))
+        if outcome in ("created", "reopened"):
+            # now, not at exit: a caller working without the lock dedupes
+            # against the cache, and a drain killed half way replays its
+            # claim against a cache that already holds the cards it filed
+            cache_sync(items)
+    try:
+        for q in leftovers:   # append: new rows may have been queued meanwhile
+            append_jsonl(PENDING, q)
+        os.remove(claim)
+    except Exception as e:
+        log("pending queue rewrite failed: %s" % e)
+    return drained
+
 def main():
     project  = os.environ["FT_PROJECT"]
     title    = os.environ["FT_TITLE"]
@@ -858,28 +942,10 @@ def main():
     # escalation: these are old records replayed on someone else's live call,
     # and the caller whose failure prompted this run already gets its own
     # escalation check below, so draining a backlog would file it again.
-    if os.path.exists(PENDING):
-        queued, leftovers = [], []
-        try:
-            with open(PENDING) as f:
-                queued = [json.loads(l) for l in f if l.strip()]
-        except Exception as e:
-            log("pending queue unreadable (%s) — leaving it" % e)
-        for q in queued:
-            outcome, _ = board_create(gh_bin, q, items, tax)
-            if outcome == "failed":
-                leftovers.append(q)
-            else:
-                log("drained pending [%s] %s -> %s" % (q.get("project"), q.get("title"), outcome))
-        try:
-            if leftovers:
-                with open(PENDING, "w") as f:
-                    for q in leftovers:
-                        f.write(json.dumps(q, separators=(",", ":")) + "\n")
-            elif queued:
-                os.remove(PENDING)
-        except Exception as e:
-            log("pending queue rewrite failed: %s" % e)
+    if _board_lock is not None:
+        drain_pending(gh_bin, items, tax)
+    elif os.path.exists(PENDING):
+        log("board lock not held; leaving the pending queue for the process that holds it")
 
     if drain_only:
         cache_sync(items)
