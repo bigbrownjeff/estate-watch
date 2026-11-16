@@ -34,35 +34,18 @@ facts=$("$HOME/.claude/bin/projects-hygiene-facts.sh" 2>/dev/null)
   # the vault DB is not on this machine.
   vault_db="$HOME/Projects/notes-vault/data/notes.db"
   if [ -f "$vault_db" ]; then
-    # Worktree checkouts duplicate their canonical repo's handoffs; exclude the
-    # estate's worktree conventions so they don't read as cross-repo collisions.
-    handoff_files=$( { find "$HOME/Projects" -path '*/.claude/handoffs/*.md' \
-                         -not -path '*/_wt/*' -not -path '*/.worktrees/*' \
-                         -not -path '*/_worktrees/*' -not -path '*-wt/*' \
-                         -not -path '*-worktrees/*' -not -path '*/.wt/*' \
-                         -not -path '*/ladder/runs/*' 2>/dev/null; \
-                       find "$HOME/.claude/handoffs" -name '*.md' 2>/dev/null; } )
-    expected=$(echo "$handoff_files" | sed 's|.*/||; s|\.md$||; s|^|session-|' | sort -u)
-    # Same filename in two repos collapses to one expected id; list those stems
-    # explicitly instead of silently false-negativing (2026-08-22: 3 repos shared
-    # "2026-07-18-initial-build" and hid behind one disambiguated set of notes).
-    collisions=$(echo "$handoff_files" | sed 's|.*/||; s|\.md$||' | sort | uniq -d)
-    ambiguous=""
-    for stem in $collisions; do
-      # Byte-identical copies are duplicate checkouts, not ambiguity.
-      n=$(echo "$handoff_files" | grep "/$stem\.md$" | while IFS= read -r f; do md5 -q "$f"; done | sort -u | wc -l | tr -d ' ')
-      [ "$n" -gt 1 ] && ambiguous="$ambiguous$stem"$'\n'
-    done
-    if [ -n "$ambiguous" ]; then
-      echo "Ambiguous (same handoff filename, DIFFERENT content, in multiple repos; verify vault coverage by hand):"
-      echo "$ambiguous" | sed '/^$/d; s/^/- /'
-    fi
-    logged=$(sqlite3 "$vault_db" "SELECT source_id FROM notes WHERE source_app='session'" 2>/dev/null | sort -u)
-    missing=$(comm -23 <(echo "$expected") <(echo "$logged") | sed '/^$/d')
-    missing_n=$(echo "$missing" | sed '/^$/d' | wc -l | tr -d ' ')
-    if [ "$missing_n" -gt 0 ]; then
-      echo "$missing_n handoff(s) with no vault session note (run: handoff-vault-sweep --apply):"
-      echo "$missing" | head -10 | sed 's/^/- /'
+    # One coverage rule, owned by handoff-vault-sweep (dry run): any live note with the
+    # id counts whatever its source_app, and a filename shared across repos with different
+    # content is covered by its repo-suffixed notes. This report only prints the verdict.
+    sweep_out=$("$HOME/.claude/bin/handoff-vault-sweep" 2>&1) || { echo "handoff-vault-sweep FAILED:"; echo "$sweep_out" | tail -3; }
+    missing_n=$(echo "$sweep_out" | sed -n 's/^missing \([0-9][0-9]*\),.*/\1/p' | head -1)
+    if [ -z "$missing_n" ]; then
+      echo "handoff-vault-sweep printed no verdict line; coverage UNKNOWN:"
+      echo "$sweep_out" | tail -3
+    elif [ "$missing_n" -gt 0 ]; then
+      echo "$sweep_out" | head -1
+      echo "$sweep_out" | grep '^DRY ' | head -10 | sed 's/^DRY /- /; s/ |.*//'
+      echo "(run: handoff-vault-sweep --apply; ambiguous stems are logged by hand with a repo-suffixed id)"
     else
       echo "All handoffs covered."
     fi

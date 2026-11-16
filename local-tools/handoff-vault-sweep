@@ -17,9 +17,17 @@ files+=glob.glob(HOME+'/.claude/handoffs/*.md')
 by=collections.defaultdict(list)
 for f in files: by[os.path.basename(f)[:-3]].append(f)
 db=sqlite3.connect(HOME+'/Projects/notes-vault/data/notes.db')
-logged={r[0] for r in db.execute("SELECT source_id FROM notes WHERE source_app='session'")}
-todo=sorted(s for s in by if 'session-'+s not in logged)
-amb=[s for s in todo if len({subprocess.run(['md5','-q',f],capture_output=True,text=True).stdout for f in by[s]})>1]
+# Any live note with the id counts, whatever its source_app: a handoff logged by hand under
+# 'log' is covered, and log-session.sh refuses to write a second note with the same id.
+logged={r[0] for r in db.execute("SELECT source_id FROM notes WHERE source_id LIKE 'session-%' AND deleted_at IS NULL")}
+own={'session-'+s for s in by}
+def variants(s): return len({subprocess.run(['md5','-q',f],capture_output=True,text=True).stdout for f in by[s]})
+def suffixed(s): return sum(1 for i in logged if i.startswith('session-'+s+'-') and i not in own)
+# A filename shared by several repos with different content is logged by hand under
+# repo-suffixed ids; it is covered once there are at least as many of those as variants.
+nvar={s:variants(s) for s in by if len(by[s])>1}
+todo=sorted(s for s in by if 'session-'+s not in logged and not (nvar.get(s,1)>1 and suffixed(s)>=nvar[s]))
+amb=[s for s in todo if nvar.get(s,1)>1]
 print(f"missing {len(todo)}, ambiguous (skipped) {len(amb)}: {amb}")
 n=0
 for stem in todo:
