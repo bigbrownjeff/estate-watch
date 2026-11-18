@@ -478,6 +478,59 @@ def check_stale_prs(cfg):
               body, "pulse:stale-prs", "warn")
 
 
+def cloud_failure_issues(issues, now, active_h):
+    """Open issues a cloud machine filed about itself ("cloud: <unit> failed on <host>")
+    that were touched within active_h hours. Pure, so the test needs no network."""
+    live = []
+    for it in issues:
+        title = it.get("title", "")
+        if not title.startswith("cloud: "):
+            continue
+        try:
+            upd = datetime.fromisoformat(it.get("updatedAt", "").replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if (now - upd) / 3600 <= active_h:
+            live.append((it.get("number"), title, it.get("url", "")))
+    return live
+
+
+def check_cloud_issues(cfg):
+    """A cloud machine's failure hook can only write to its own repository, with the
+    owner's token, which notifies nobody (notes-vault#63: 96 comments in four days,
+    unseen, Nov 2026). Bridge those issues to the board."""
+    repos = cfg.get("pulse_cloud_issue_repos", ["bigbrownjeff/notes-vault"])
+    active_h = cfg.get("pulse_cloud_issue_active_hours", 6)
+    gh = find_gh()
+    if not gh:
+        plog("CHECK F: gh not found — skipping")
+        return
+    for slug in repos:
+        try:
+            r = subprocess.run(
+                [gh, "issue", "list", "--repo", slug, "--state", "open", "--search", "cloud: in:title",
+                 "--json", "number,title,updatedAt,url", "--limit", "50"],
+                capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                plog("CHECK F: gh issue list %s failed: %s" % (slug, r.stderr.strip()[:120]))
+                continue
+            live = cloud_failure_issues(json.loads(r.stdout or "[]"), time.time(), active_h)
+        except Exception as e:
+            plog("CHECK F: %s error: %r" % (slug, e))
+            continue
+        plog("CHECK F: %s: %d live cloud failure issue(s)" % (slug, len(live)))
+        for (num, title, url) in live:
+            body = (
+                "The cloud machine reported a failure in the last %dh and the issue is still open:\n\n"
+                "- %s#%s: %s\n  %s\n\n"
+                "Its journal tail is in the newest comment. Fix it, then close the issue;\n"
+                "this card stays deduped (key pulse:cloud-issue:%s#%s) while the issue is open."
+                % (active_h, slug, num, title, url, slug, num)
+            )
+            file_card(slug.split("/")[-1], "estate-pulse: %s" % title, body,
+                      "pulse:cloud-issue:%s#%s" % (slug, num), "error")
+
+
 def curl_head_ok(url, timeout=5):
     try:
         r = subprocess.run(["/usr/bin/curl", "-sS", "-o", "/dev/null", "-I",
@@ -816,6 +869,7 @@ def main():
             check_launchd_exits(cfg)
             state = check_loops(cfg, state)
             check_stale_prs(cfg)
+            check_cloud_issues(cfg)
             check_missed_slots(cfg, state)
         else:
             # the 08:00 failure mode: do NOT relaunch a loop into a dead network, and
