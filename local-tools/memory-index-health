@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""memory-index-health: per profile, report MEMORY.md bytes/lines, dead links, duplicate
+targets, unindexed files (counting sub-index files memory-index-*.md as indexes).
+Exit 1 when any profile is >= 16,000 bytes or >= 150 lines, or has a dead link or duplicate."""
+import os,re,sys,glob
+LINK=re.compile(r"\]\(([A-Za-z0-9][A-Za-z0-9_.-]*\.md)\)")
+H=os.path.expanduser('~'); bad=0; seen=set()
+for prof in sorted(glob.glob(H+'/.claude')+glob.glob(H+'/.claude-*')):
+    d=os.path.join(prof,'projects/-Users-jeffpinto/memory'); idx=os.path.join(d,'MEMORY.md')
+    if not os.path.exists(idx): continue
+    real=os.path.realpath(d); shared=' (same tree as %s)'%seen and '' 
+    t=open(idx).read(); b=len(t.encode()); l=t.count('\n')
+    links=LINK.findall(t)
+    for s in glob.glob(os.path.join(d,'memory-index-*.md')): links+=LINK.findall(open(s).read())
+    files={f for f in os.listdir(d) if f.endswith('.md') and f!='MEMORY.md'}
+    dead=sorted({x for x in links if x not in files}); dup=sorted({x for x in links if links.count(x)>1})
+    unidx=sorted(files-set(links)-{os.path.basename(s) for s in glob.glob(os.path.join(d,'memory-index-*.md'))})
+    flag=b>=16000 or l>=150 or dead or dup
+    bad|=bool(flag)
+    print('%-22s %s bytes=%d lines=%d files=%d dead=%d dup=%d unindexed=%d%s'%(os.path.basename(prof),'ACT ' if flag else 'ok  ',b,l,len(files),len(dead),len(dup),len(unidx),'  [shared tree]' if real in seen else ''))
+    for x in dead[:10]: print('   dead',x)
+    for x in dup[:10]: print('   dup ',x)
+    seen.add(real)
+sys.exit(1 if bad else 0)
