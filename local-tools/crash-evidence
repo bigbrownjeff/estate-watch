@@ -1,0 +1,79 @@
+#!/bin/bash
+# crash-evidence: keep what a crash leaves behind, before a reinstall erases it.
+# Runs at login and hourly. Copies new kernel panic reports and the firmware's
+# boot-panic stamps to ~/data-vaults/crash-evidence, pushes them offsite, and
+# files one board card per new panic. (Why: 2026-11-18 the Studio stopped at
+# 09:00:21, stamped a boot panic 16 s later and needed macOS reinstalled; the
+# panic report did not survive, so the cause could not be read.)
+# Env overrides exist for tests: CRASH_SRC, CRASH_DEST, CRASH_REMOTE, NVRAM, RCLONE, FAILTASK.
+set -uo pipefail
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+src="${CRASH_SRC:-/Library/Logs/DiagnosticReports}"
+dest="${CRASH_DEST:-$HOME/data-vaults/crash-evidence}"
+remote="${CRASH_REMOTE:-gdw-crypt:data-vaults/crash-evidence/$(hostname -s)}"
+nvram_bin="${NVRAM:-/usr/sbin/nvram}"
+rclone_bin="${RCLONE:-rclone}"
+failtask="${FAILTASK:-$HOME/.claude/bin/failtask}"
+
+log() { printf '%s crash-evidence: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+card() {  # title, detail, dedupe key
+  if [ -x "$failtask" ]; then
+    "$failtask" infra "$1" --detail "$2" --dedupe-key "$3" || log "failtask exited nonzero for: $1"
+  else
+    log "no failtask at $failtask; would have filed: $1"
+  fi
+}
+
+mkdir -p "$dest/reports" || { log "cannot create $dest"; exit 1; }
+[ -d "$src" ] || { log "source $src is missing"; card "crash-evidence cannot read $src" "directory missing" crash-evidence-broken; exit 1; }
+
+new=0
+# A panic report is named *.panic, or is an .ips whose first line names a panic bug type.
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  base="$(basename "$f")"
+  case "$base" in
+    *.panic|*panic*.ips|ResetCounter*|*forceReset*) ;;
+    *.ips) head -c 400 "$f" 2>/dev/null | grep -q '"bug_type":"\(210\|110\|115\|151\)"' || continue ;;
+    *) continue ;;
+  esac
+  [ -f "$dest/reports/$base" ] && continue
+  if cp -p "$f" "$dest/reports/$base"; then
+    new=$((new + 1))
+    log "kept $base"
+    card "Kernel panic or forced reset recorded on $(hostname -s): $base" \
+      "Copied to $dest/reports/$base and offsite. Read it before any reinstall." "crash-evidence-$base"
+  else
+    log "could not copy $base"
+  fi
+done < <(find "$src" -maxdepth 2 -type f 2>/dev/null)
+
+# The boot-panic stamp changes only when the machine panics during startup.
+stamp="$("$nvram_bin" -p 2>/dev/null | grep -i '^panicmedic' | sort)"
+last="$dest/panicmedic.last"
+if [ -n "$stamp" ] && [ "$stamp" != "$(cat "$last" 2>/dev/null)" ]; then
+  first_run=0; [ -f "$last" ] || first_run=1
+  printf '%s\n' "$stamp" > "$last"
+  printf '%s\n%s\n\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$stamp" >> "$dest/panicmedic.history"
+  new=$((new + 1))
+  if [ "$first_run" = 1 ]; then
+    log "recorded the boot-panic stamp for the first time"
+  else
+    log "boot-panic stamp changed"
+    card "Boot-panic stamp changed on $(hostname -s)" \
+      "The firmware recorded a panic during startup. History: $dest/panicmedic.history" \
+      "crash-evidence-panicmedic-$(date +%Y%m%d)"
+  fi
+fi
+
+if [ "$new" -gt 0 ]; then
+  if "$rclone_bin" copy "$dest" "$remote" -q; then
+    log "pushed $new new item(s) to $remote"
+  else
+    log "offsite push FAILED"
+    card "crash-evidence offsite push failed" "rclone copy $dest $remote exited nonzero" crash-evidence-offsite
+    exit 1
+  fi
+fi
+log "ok new=$new"

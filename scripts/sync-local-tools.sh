@@ -23,6 +23,8 @@ rows=(
   "local-tools/handoff-vault-sweep|$HOME/.claude/bin/handoff-vault-sweep|0755"
   "local-tools/memory-index-health|$HOME/.claude/bin/memory-index-health|0755"
   "local-tools/cloudflared-upgrade-watch|$HOME/.claude/bin/cloudflared-upgrade-watch|0755"
+  "local-tools/crash-evidence|$HOME/.claude/bin/crash-evidence|0755"
+  "local-tools/tests/test_crash_evidence.sh|$HOME/.claude/bin/tests/test_crash_evidence.sh|0755"
   "local-tools/claude-headless|$HOME/.claude/bin/claude-headless|0755"
   "local-tools/failtask|$HOME/.claude/bin/failtask|0755"
   "local-tools/tests/test_failtask_issue_path.py|$HOME/.claude/bin/tests/test_failtask_issue_path.py|0755"
