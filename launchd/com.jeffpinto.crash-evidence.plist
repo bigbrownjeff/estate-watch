@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.jeffpinto.crash-evidence</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/jeffpinto/.claude/bin/runlog</string><string>--tag</string><string>crash-evidence</string>
+    <string>/bin/bash</string><string>/Users/jeffpinto/.claude/bin/crash-evidence</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartCalendarInterval</key><dict><key>Minute</key><integer>7</integer></dict>
+  <key>StandardOutPath</key><string>/Users/jeffpinto/.claude/logs/crash-evidence.log</string>
+  <key>StandardErrorPath</key><string>/Users/jeffpinto/.claude/logs/crash-evidence.err</string>
+</dict></plist>

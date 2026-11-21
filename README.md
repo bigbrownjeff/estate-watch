@@ -56,6 +56,14 @@ absent from `~/Library/LaunchAgents` the producer was retired on purpose and fle
 filing "producer has silently stopped" (board#2088: the off-season MLB jobs). `local-tools/tests/test_fleet_sentinel_retired_log.sh`
 proves the skip and that unlabelled and live specs still fire.
 
+`local-tools/crash-evidence` keeps what a crash leaves behind
+(`launchd/com.jeffpinto.crash-evidence.plist`, at login and hourly at minute 7). It copies new
+kernel panic reports and the firmware's `panicmedic` boot-panic stamps to
+`~/data-vaults/crash-evidence`, pushes them to `gdw-crypt:data-vaults/crash-evidence/<host>`,
+and files one board card per new panic. Why: on 2026-11-18 the Studio panicked, could not boot
+and was reinstalled, and no panic report survived to say why. Test:
+`local-tools/tests/test_crash_evidence.sh` (stubs nvram, rclone and failtask).
+
 `local-tools/cloudflared-upgrade-watch` is a self-clearing daily job (`launchd/com.jeffpinto.cloudflared-upgrade-watch.plist`,
 07:20): it waits for Homebrew to bottle the target cloudflared version named in the plist, upgrades, restarts the
 four live tunnel agents one at a time, verifies every tunnel hostname answers and that Cloudflare reports the new
