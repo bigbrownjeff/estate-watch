@@ -7,6 +7,14 @@
 #                  [--label FAILURE|"OPEN THREAD"|...]   (title prefix; default FAILURE, so
 #                  every existing caller is unchanged. Not every board card a job files is a
 #                  failure: the dangling-tasks lint files open threads.)
+#        failtask --resolve <project> --dedupe-key KEY [--note "why"] [--dry-run]
+#                  Closes the ONE open card whose body carries the exact "failkey: KEY" line AND
+#                  "project-raw: <project>" (no substring/prefix/title matching). Status -> Done,
+#                  issue closed, comment "Resolved by the filing job's own re-check on <UTC>: <note>".
+#                  Never deletes. A later filing of the same key reopens it via the normal path.
+#                  Exit 0: closed, or nothing open (resolving twice is fine); 2: usage error or
+#                  more than one open match (ids listed, nothing changed); 1: any gh/API error.
+#                  --resolve is the ONE mode that exits nonzero; filing never does.
 #
 # Guarantees:
 #   - NEVER exits nonzero (a failure reporter must not break its caller).
@@ -43,8 +51,15 @@
 # no writes), every key that would escalate right now.
 set -u
 
-FT_PROJECT="${1:-}"; FT_TITLE="${2:-}"
-if [ "$FT_PROJECT" = "--drain" ]; then
+FT_PROJECT="${1:-}"; FT_TITLE="${2:-}"; FT_MODE=""; FT_NOTE=""; FT_RESOLVE_DRY=0
+if [ "$FT_PROJECT" = "--resolve" ]; then
+  FT_MODE="resolve"; FT_PROJECT="${2:-}"; FT_TITLE="__resolve__"
+  if [ -z "$FT_PROJECT" ]; then
+    echo "failtask: usage: failtask --resolve <project> --dedupe-key KEY [--note \"why\"] [--dry-run]" >&2
+    exit 2
+  fi
+  if [ "$#" -ge 2 ]; then shift 2; else shift "$#"; fi
+elif [ "$FT_PROJECT" = "--drain" ]; then
   # maintenance mode: only drain the pending-board queue, file nothing new
   FT_PROJECT="__drain__"; FT_TITLE="__drain__"
   set --
@@ -55,7 +70,7 @@ elif [ "$FT_PROJECT" = "--stuck-report" ]; then
 else
   if [ -z "$FT_PROJECT" ] || [ -z "$FT_TITLE" ]; then
     echo "failtask: usage: failtask <project> \"<title>\" [--detail ...] [--dedupe-key KEY] [--severity warn|error] [--no-escalate]" >&2
-    echo "failtask: also: failtask --stuck-report | failtask --drain" >&2
+    echo "failtask: also: failtask --resolve <project> --dedupe-key KEY [--note \"why\"] [--dry-run] | failtask --stuck-report | failtask --drain" >&2
     exit 0   # even usage errors must not break the caller
   fi
   shift 2
@@ -68,10 +83,16 @@ while [ "$#" -gt 0 ]; do
     --severity)    FT_SEVERITY="${2:-error}"; shift 2 || shift ;;
     --label)       FT_LABEL="${2:-FAILURE}"; shift 2 || shift ;;
     --no-escalate) FT_NO_ESCALATE=1; shift ;;
+    --note)        FT_NOTE="${2:-}"; shift 2 || shift ;;
+    --dry-run)     FT_RESOLVE_DRY=1; shift ;;
     *) echo "failtask: ignoring unknown arg: $1" >&2; shift ;;
   esac
 done
-export FT_PROJECT FT_TITLE FT_DETAIL FT_KEY FT_SEVERITY FT_LABEL FT_NO_ESCALATE
+if [ "$FT_MODE" = "resolve" ] && [ -z "$FT_KEY" ]; then
+  echo "failtask: --resolve needs --dedupe-key KEY (exact key; never inferred from a title)" >&2
+  exit 2
+fi
+export FT_PROJECT FT_TITLE FT_DETAIL FT_KEY FT_SEVERITY FT_LABEL FT_NO_ESCALATE FT_MODE FT_NOTE FT_RESOLVE_DRY
 
 PY=/usr/bin/python3
 [ -x "$PY" ] || PY="$(command -v python3 2>/dev/null || echo /usr/bin/python3)"
@@ -900,9 +921,151 @@ def drain_pending(gh_bin, items, tax):
         log("pending queue rewrite failed: %s" % e)
     return drained
 
+# ------------------------------------------------------------------- resolve
+#
+# Inverse of reopen(): the filing job's own re-check found the condition healthy,
+# so its card goes Done. Exact marker match only, and only ONE open card.
+
+def project_raw_matches(item, project):
+    body = (item.get("content") or {}).get("body", "") or ""
+    return any(l.strip() == "project-raw: %s" % project for l in body.splitlines())
+
+def find_open_all(items, marker, project):
+    """Every NOT-Done item whose body has a whole line equal to marker (same
+    line-equality rule as find_match) and a whole 'project-raw:' line equal to project."""
+    out = []
+    for it in items:
+        body = (it.get("content") or {}).get("body", "") or ""
+        if not any(l.strip() == marker for l in body.splitlines()):
+            continue
+        if it.get("status") == "Done" or not project_raw_matches(it, project):
+            continue
+        out.append(it)
+    return out
+
+def done_option_id(gh_bin):
+    q = "query($id:ID!){node(id:$id){... on ProjectV2SingleSelectField{options{id name}}}}"
+    r = gh(gh_bin, ["api", "graphql", "-f", "query=" + q, "-f", "id=" + FIELD_STATUS])
+    if r.returncode != 0:
+        raise RuntimeError("Status field option lookup failed: %s" % r.stderr.strip())
+    for o in ((json.loads(r.stdout).get("data") or {}).get("node") or {}).get("options") or []:
+        if o.get("name") == "Done":
+            return o["id"]
+    raise RuntimeError("Status field %s has no 'Done' option" % FIELD_STATUS)
+
+def resolve_main():
+    global DRYRUN
+    project = os.environ["FT_PROJECT"]; key = os.environ["FT_KEY"]
+    note = os.environ.get("FT_NOTE", "") or "no note given"
+    dry = os.environ.get("FT_RESOLVE_DRY") == "1"
+    DRYRUN = dry   # gh_write then prints instead of running
+    tag = "%s/%s" % (project, key)
+    gh_bin = find_gh()
+    if not gh_bin:
+        print("failtask: --resolve: gh not found", file=sys.stderr); return 1
+    os.makedirs(FAILDIR, exist_ok=True)
+    _lock = take_board_lock()  # noqa: F841
+    # Full-board walk costs ~all of the hourly GraphQL budget and fails loudly when it is
+    # spent. So: a cache <= CACHE_TTL old (the same freshness filing dedupes on) finds the
+    # candidate; otherwise a live walk, whose failure is fatal. The candidate's live Status
+    # is then re-read per item before anything is changed.
+    items = read_cache(max_age=CACHE_TTL)
+    if items is None:
+        r = gh(gh_bin, ["project", "item-list", PROJECT_NUM, "--owner", PROJECT_OWNER,
+                        "--format", "json", "--limit", LIST_LIMIT])
+        if r.returncode != 0:
+            print("failtask: --resolve: gh item-list failed: %s" % r.stderr.strip(), file=sys.stderr); return 1
+        payload = json.loads(r.stdout)
+        items = payload.get("items", [])
+        total = payload.get("totalCount")
+        if isinstance(total, int) and total > len(items):
+            print("failtask: --resolve: item-list TRUNCATED %d of %d (raise LIST_LIMIT)" % (len(items), total), file=sys.stderr)
+            return 1
+        if not dry:
+            write_cache(items)
+    hits = find_open_all(items, "failkey: %s" % key, project)
+    if not hits:
+        print("failtask: nothing open for %s" % tag); return 0
+    if len(hits) > 1:
+        print("failtask: refusing: %d open cards match %s, nothing changed: %s"
+              % (len(hits), tag, ", ".join(str(h.get("id")) for h in hits)), file=sys.stderr)
+        return 2
+    item = hits[0]
+    q = ("query($id:ID!){node(id:$id){... on ProjectV2Item{fieldValueByName(name:\"Status\")"
+         "{... on ProjectV2ItemFieldSingleSelectValue{name}} content{__typename ... on Issue{id number url}"
+         " ... on DraftIssue{id}}}}}")
+    r = gh(gh_bin, ["api", "graphql", "-f", "query=" + q, "-f", "id=" + item["id"]])
+    if r.returncode != 0:
+        print("failtask: --resolve: live status check failed: %s" % r.stderr.strip(), file=sys.stderr); return 1
+    node = (json.loads(r.stdout).get("data") or {}).get("node") or {}
+    live = (node.get("fieldValueByName") or {}).get("name")
+    lc = node.get("content") or {}   # the cache can hold a just-filed item without id/number/url
+    live_content = {k: lc[k] for k in ("id", "number", "url") if lc.get(k)}
+    if live == "Done":
+        item["status"] = "Done"
+        if not dry:
+            cache_sync(items)
+        print("failtask: nothing open for %s" % tag); return 0
+    content = dict(item.get("content") or {})
+    content.update(live_content)
+    ctype = lc.get("__typename") or content.get("type")
+    stamp = "Resolved by the filing job's own re-check on %s: %s" % (
+        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), note)
+    title = content.get("title") or item.get("title") or ""
+    print("failtask: %splan for %s: item %s (%s) %r" % ("DRY-RUN " if dry else "", tag, item.get("id"), ctype, title))
+    print("failtask:   1. add to card: %s" % stamp)
+    if ctype == "Issue":
+        print("failtask:   2. close issue #%s (state_reason=completed)" % content.get("number"))
+    print("failtask:   3. set Status -> Done")
+    done_opt = done_option_id(gh_bin)
+    # Status flips LAST: any earlier failure leaves the card open, not half-closed.
+    if ctype == "DraftIssue":
+        body = content.get("body", "") or ""
+        new_body = body.rstrip("\n") + "\n" + stamp
+        args = ["project", "item-edit", "--id", content.get("id"), "--body", new_body]
+        if title:
+            args += ["--title", title]
+        r = gh_write(gh_bin, args)
+        if r.returncode != 0:
+            print("failtask: --resolve: body edit failed: %s" % r.stderr.strip(), file=sys.stderr); return 1
+    elif ctype == "Issue":
+        if not post_comment(gh_bin, content, stamp):
+            print("failtask: --resolve: comment failed (see above); card left open", file=sys.stderr); return 1
+        number = content.get("number")
+        m = ISSUE_URL_RE.match(content.get("url") or "")
+        repo = m.group(1) if m else BOARD_REPO
+        if not number:
+            print("failtask: --resolve: issue has no number; card left open", file=sys.stderr); return 1
+        r = gh_write(gh_bin, ["api", "-X", "PATCH", "repos/%s/issues/%s" % (repo, number),
+                              "-f", "state=closed", "-f", "state_reason=completed"])
+        if r.returncode != 0:
+            print("failtask: --resolve: issue close failed: %s" % r.stderr.strip(), file=sys.stderr); return 1
+    else:
+        print("failtask: --resolve: unknown content type %r for item %s; refusing" % (ctype, item.get("id")), file=sys.stderr)
+        return 1
+    r = gh_write(gh_bin, ["project", "item-edit", "--project-id", PROJECT_ID, "--id", item["id"],
+                          "--field-id", FIELD_STATUS, "--single-select-option-id", done_opt])
+    if r.returncode != 0:
+        print("failtask: --resolve: status edit failed: %s" % r.stderr.strip(), file=sys.stderr); return 1
+    if dry:
+        print("failtask: DRY-RUN complete, nothing changed for %s" % tag)
+        return 0
+    item["status"] = "Done"
+    if ctype == "DraftIssue":
+        content["body"] = new_body; item["content"] = content
+    cache_sync(items)
+    print("failtask: RESOLVED %s: item %s now Done" % (tag, item.get("id")))
+    return 0
+
 def main():
     project  = os.environ["FT_PROJECT"]
     title    = os.environ["FT_TITLE"]
+    if title == "__resolve__":
+        try:
+            rc = resolve_main()
+        except Exception as e:
+            print("failtask: --resolve: ERROR: %r" % e, file=sys.stderr); rc = 1
+        sys.stdout.flush(); sys.exit(rc)
     if project == "__stuck_report__":
         stuck_report()  # reads FAILDIR/JSONL only; must not create it (docstring: "writes nothing")
         return
@@ -962,4 +1125,6 @@ except Exception as e:
     sys.stderr.write("failtask: INTERNAL ERROR (still exiting 0): %r\n" % e)
 sys.exit(0)
 PYEOF
+FT_RC=$?
+[ "$FT_MODE" = "resolve" ] && exit "$FT_RC"
 exit 0
