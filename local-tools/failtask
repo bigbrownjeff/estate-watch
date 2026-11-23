@@ -15,6 +15,7 @@
 #                  Exit 0: closed, or nothing open (resolving twice is fine); 2: usage error or
 #                  more than one open match (ids listed, nothing changed); 1: any gh/API error.
 #                  --resolve is the ONE mode that exits nonzero; filing never does.
+#                  A card filed within the cache window (see CACHE_TTL) can be missed and reported as nothing open; rerun later.
 #
 # Guarantees:
 #   - NEVER exits nonzero (a failure reporter must not break its caller).
