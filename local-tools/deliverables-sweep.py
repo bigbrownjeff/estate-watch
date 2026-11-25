@@ -39,27 +39,41 @@ Opt-out (two mechanisms, either is enough to exclude content):
      substrings; any candidate path containing one of them is skipped. Use this
      when you cannot (or should not) drop a marker file into the source repo.
 
-Performance note: notes_vault.logger.add_note() reimports its whole log_dir on
-every call (by design, for the small corpora -- ~100 notes -- the existing wiki
-generators run over). This sweep's corpus is ~10x that, so calling add_note
-per file unmodified would reimport an ever-growing directory on every single
-file, i.e. quadratic cost that gets worse forever. Instead we call add_note
-with notes_vault.importer.import_dir patched to a no-op for the duration of the
-sweep (every other add_note code path -- frontmatter, hashing, attachment
-copy -- runs untouched) and do exactly one real import_dir pass at the end.
-This is the standard sweep-vs-generator size distinction, not a shortcut around
-the tested write path.
+Routed writes (record contract, board card 2410): since 2026-11-23 the vault of
+record is the cloud machine and this Mac holds a read-only replica whose
+WRITES-FROZEN sentinel says "moved". The sweep is a registered routed generator:
+it passes routed=True to require_apply_authority, and notes_vault.logger.add_note
+hands each note to the outbox and returns a dict with queued=True (no note id yet,
+no local file). Per run:
+  - a note whose title+tags+body hash equals the last hash known on the record
+    (the outbox's SENT-HASHES.json, or the replica file, whichever is newer) or the
+    hash of an item of it still waiting in the outbox's pending/ is SKIPPED before
+    add_note, so an unchanged note is never queued again, sent or not yet sent;
+  - every other note is counted from add_note's return dict: queued (moved vault)
+    or written (local vault);
+  - a refused write (secret scan, bad item) is counted as refused, printed to
+    stderr, and makes the run exit nonzero; it is never swallowed;
+  - ONE outbox.flush() at the end sends the batch (use --no-flush to only queue);
+  - the final bulk import_dir only runs on a vault that has NOT moved (the
+    replica is read-only and the record indexes its own notes).
+On a local (not moved) vault the old path is kept: add_note runs with
+importer.import_dir patched to a no-op (add_note would otherwise reimport the whole
+log dir per file, quadratic on ~2,000 notes) and one real import_dir pass at the end.
 
-Loud failure: any uncaught exception exits nonzero and reports through
-`failtask outbound`, per CLAUDE.md #4 (loud errors beat silent fallbacks).
+Loud failure: any uncaught exception, any refused note, any per-file error and any
+flush transport error exits nonzero and reports through `failtask outbound`, per
+CLAUDE.md #4 (loud errors beat silent fallbacks). The last stdout line always
+states written, queued, skipped and refused counts.
 
 Run: python3 ~/.claude/bin/deliverables-sweep.py [--dry-run] [--projects-root DIR]
+     [--limit N] [--no-flush]
 """
 import argparse
 import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -83,6 +97,8 @@ SKIP_PATH_SEGMENTS = ("/_wt/", "/.claude/worktrees/", "/ladder/runs/")
 SCAN_MARKERS = ("/docs/deliverables/", "/workups/", "/pitches/")
 
 FAILTASK = os.path.expanduser("~/.claude/bin/failtask")
+# A rehearsal (NV_REHEARSAL=1) must never file a board card.
+REHEARSAL = os.environ.get("NV_REHEARSAL") == "1"
 
 
 def _load_vault_modules(vault_repo):
@@ -93,13 +109,14 @@ def _load_vault_modules(vault_repo):
     os.chdir(vault_repo)
     sys.path.insert(0, os.path.join(vault_repo, "scripts"))
     from notes_vault.db import connect
-    from notes_vault import logger, importer
+    from notes_vault import logger, importer, freeze, outbox
     from notes_vault.frontmatter import parse as parse_frontmatter, FrontmatterError
     try:
         from write_authority import require_apply_authority
     except ImportError:
         require_apply_authority = None
-    return connect, logger, importer, parse_frontmatter, FrontmatterError, require_apply_authority
+    return (connect, logger, importer, freeze, outbox, parse_frontmatter, FrontmatterError,
+            require_apply_authority)
 
 
 def load_skip_list(path=None):
@@ -245,9 +262,62 @@ def build_body(path, repo, sha, size, is_text):
     return excerpt + footer
 
 
+def _pending_hashes(outbox):
+    """{note_id: content hash} of the sweep notes queued in the outbox and not yet
+    sent. Newest item per note wins; a pending append voids the note's entry (its
+    content on the record is no longer the replace's). Read-only, and an item that
+    cannot be read is ignored (flush will refuse it; the sweep must not die on it)."""
+    root = outbox.outbox_root()
+    rows = []
+    for ev in outbox._list_ids(root, "pending"):
+        d = os.path.join(root, "pending", ev)
+        try:
+            item = outbox.items.read_item(d)
+            if item.get("source_app") != SOURCE_APP:
+                continue
+            origin = item["origin"]
+            rows.append((origin["host"], origin["seq"], item, d))
+        except (outbox.items.FramingError, KeyError, TypeError, ValueError, OSError):
+            continue
+    rows.sort(key=lambda r: (r[0], r[1]))
+    hashes = {}
+    for _host, _seq, item, d in rows:
+        if item.get("op") == "append":
+            hashes.pop(item["source_id"], None)
+            continue
+        try:
+            hashes[item["source_id"]] = outbox._item_hash(item, d)
+        except (KeyError, OSError):
+            continue
+    return hashes
+
+
+def _known_hash(vault_moved, outbox, logger, parse_frontmatter, data_dir, log_dir, note_id,
+                pending=None):
+    """The content hash of the note as last known to the record, or None.
+
+    Moved vault: a note already queued in the outbox (pending, newest), else the newer
+    of the outbox's SENT-HASHES entry and the replica file (outbox._base_hash, the same
+    value the outbox stamps as base_hash on a replace).
+    Local vault: the note file already in log_dir."""
+    if vault_moved:
+        if pending and note_id in pending:
+            return pending[note_id]
+        return outbox._base_hash(outbox.outbox_root(), data_dir,
+                                 outbox._norm_log_dir(log_dir, SOURCE_APP),
+                                 SOURCE_APP, note_id)
+    path = os.path.join(log_dir, note_id + ".md")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            fm, body = parse_frontmatter(fh.read())
+    except (OSError, ValueError):
+        return None
+    return logger._content_hash(fm.get("title"), fm.get("tags"), body)
+
+
 def run_sweep(projects_root=PROJECTS_ROOT_DEFAULT, vault_repo=VAULT_REPO, dry_run=False,
-              db_path=None, log_dir=None):
-    (connect, logger, importer, parse_frontmatter, FrontmatterError,
+              db_path=None, log_dir=None, limit=None, flush=True):
+    (connect, logger, importer, freeze, outbox, parse_frontmatter, FrontmatterError,
      require_apply_authority) = _load_vault_modules(vault_repo)
 
     # Absolute overrides let tests and one-off runs point at a throwaway
@@ -257,10 +327,15 @@ def run_sweep(projects_root=PROJECTS_ROOT_DEFAULT, vault_repo=VAULT_REPO, dry_ru
     db_path = db_path or os.path.join(vault_repo, "data", "notes.db")
     log_dir = log_dir or os.path.join(vault_repo, LOG_DIR_REL)
     if require_apply_authority is not None and not dry_run:
-        require_apply_authority(tool="deliverables-sweep.py", db_path=db_path)
+        # routed=True: a moved vault is allowed, and the authority is published in
+        # NV_ROUTED_AUTHORITY for the outbox (registered generator, contract 2.2).
+        require_apply_authority(tool="deliverables-sweep.py", db_path=db_path, routed=True)
+
+    data_dir = freeze.data_dir_for_db(db_path)
+    vault_moved = freeze.routing_target(freeze.read_state(data_dir)) is not None
 
     skip_substrings = load_skip_list()
-    seen = written = unchanged = skipped_optout = errors = 0
+    seen = written = queued = skipped = skipped_optout = refused = errors = 0
 
     real_import_dir = importer.import_dir
 
@@ -268,11 +343,25 @@ def run_sweep(projects_root=PROJECTS_ROOT_DEFAULT, vault_repo=VAULT_REPO, dry_ru
         return {"found": 0, "inserted": 0, "updated": 0, "attachments": 0,
                 "missing_attachments": 0, "parse_errors": [], "parse_error_count": 0}
 
-    conn = None if dry_run else connect(db_path)
+    pending = _pending_hashes(outbox) if (vault_moved and not dry_run) else {}
+    conn = None
+    if not dry_run:
+        if vault_moved:
+            # add_note only reads the data directory off this handle before it routes
+            # the call to the outbox. An immutable handle cannot write a WAL side file
+            # into the read-only replica tree (what connect() could do).
+            conn = sqlite3.connect("file:" + os.path.realpath(db_path) + "?immutable=1",
+                                   uri=True)
+        else:
+            conn = connect(db_path)
+    patched = False
     try:
-        if not dry_run:
+        if not dry_run and not vault_moved:
             importer.import_dir = _noop_import_dir  # deferred bulk reimport; see docstring
+            patched = True
         for path, relpath in iter_candidate_files(projects_root, skip_substrings):
+            if limit is not None and seen >= limit:
+                break
             seen += 1
             repo, rel_after_repo = split_repo(relpath)
             ext = os.path.splitext(path)[1].lower()
@@ -294,42 +383,49 @@ def run_sweep(projects_root=PROJECTS_ROOT_DEFAULT, vault_repo=VAULT_REPO, dry_ru
                     print("DRY-RUN would log:", note_id, "<-", relpath)
                     written += 1
                     continue
-                target_md = os.path.join(log_dir, note_id + ".md")
-                before_mtime = (os.path.getmtime(target_md)
-                                 if os.path.isfile(target_md) else None)
-                logger.add_note(
+                if _known_hash(vault_moved, outbox, logger, parse_frontmatter, data_dir,
+                               log_dir, note_id, pending) == logger._content_hash(title, tags, body):
+                    skipped += 1  # unchanged since the record last took it, or already queued
+                    continue
+                result = logger.add_note(
                     conn, title=title, body=body, tags=tags, source="claude.sweep",
                     source_app=SOURCE_APP, log_dir=log_dir, note_id=note_id)
-                after_mtime = (os.path.getmtime(target_md)
-                               if os.path.isfile(target_md) else None)
-                # add_note skips its own file write when the hashed content
-                # (title+tags+body) is unchanged from the note already on disk;
-                # an unmoved mtime is how we detect that from the outside, since
-                # the no-op import_dir patch above means the return dict's "id"
-                # lookup never resolves during this loop.
-                if before_mtime != after_mtime:
-                    written += 1
+                if result.get("queued"):
+                    queued += 1
                 else:
-                    unchanged += 1
+                    written += 1
+            except outbox.OutboxRefusal as exc:
+                refused += 1
+                print("REFUSED", path, ":", exc, file=sys.stderr)
             except Exception:
                 errors += 1
                 print("ERROR on", path, ":", traceback.format_exc(), file=sys.stderr)
     finally:
-        if not dry_run:
+        if patched:
             importer.import_dir = real_import_dir
 
+    flush_stats = {"sent": 0, "refused": 0, "deferred": 0, "left": 0, "paused": False,
+                   "busy": False, "error": None}
     import_stats = {"found": 0, "inserted": 0, "updated": 0}
     if not dry_run and conn is not None:
-        os.makedirs(log_dir, exist_ok=True)  # nothing may have been written this run
-        import_stats = real_import_dir(conn, log_dir, source_app=SOURCE_APP)
+        if vault_moved:
+            if flush and queued:
+                flush_stats = outbox.flush()
+        else:
+            os.makedirs(log_dir, exist_ok=True)  # nothing may have been written this run
+            import_stats = real_import_dir(conn, log_dir, source_app=SOURCE_APP)
         conn.close()
 
     return {
         "seen": seen,
         "written": written,
-        "unchanged": unchanged,
+        "queued": queued,
+        "skipped": skipped,
         "skipped_optout": skipped_optout,
+        "refused": refused,
         "errors": errors,
+        "moved": vault_moved,
+        "flush": flush_stats,
         "import": import_stats,
     }
 
@@ -339,30 +435,57 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--projects-root", default=PROJECTS_ROOT_DEFAULT)
     ap.add_argument("--vault-repo", default=VAULT_REPO)
+    ap.add_argument("--limit", type=int, default=None,
+                    help="stop after N candidate files (rehearsal)")
+    ap.add_argument("--no-flush", action="store_true",
+                    help="queue only; leave the send to the outbox job")
     args = ap.parse_args(argv)
 
     try:
         stats = run_sweep(projects_root=args.projects_root, vault_repo=args.vault_repo,
-                           dry_run=args.dry_run)
+                           dry_run=args.dry_run, limit=args.limit, flush=not args.no_flush)
     except Exception as exc:
         detail = traceback.format_exc()
         print("deliverables-sweep FAILED:", exc, file=sys.stderr)
         print(detail, file=sys.stderr)
-        if os.path.isfile(FAILTASK):
+        if os.path.isfile(FAILTASK) and not REHEARSAL:
             subprocess.run([FAILTASK, "outbound", "deliverables sweep failed",
                              "--detail", str(exc)[:500]], check=False)
         return 1
 
-    print("deliverables-sweep: files_seen=%d written=%d unchanged=%d skipped_optout=%d "
-          "errors=%d import_found=%d import_inserted=%d import_updated=%d" % (
-              stats["seen"], stats["written"], stats["unchanged"], stats["skipped_optout"],
-              stats["errors"], stats["import"].get("found", 0),
-              stats["import"].get("inserted", 0), stats["import"].get("updated", 0)))
-    if stats["errors"] and os.path.isfile(FAILTASK):
-        subprocess.run([FAILTASK, "outbound", "deliverables sweep had per-file errors",
-                         "--detail", str(stats["errors"]) + " file(s) failed; see log"],
-                        check=False)
-    return 0 if stats["errors"] == 0 else 1
+    fl = stats["flush"]
+    problems = []
+    if stats["refused"] or fl["refused"]:
+        problems.append("%d refused (%d at queue, %d by the record)" % (
+            stats["refused"] + fl["refused"], stats["refused"], fl["refused"]))
+    if stats["errors"]:
+        problems.append("%d per-file error(s)" % stats["errors"])
+    if fl["error"]:
+        problems.append("flush error: " + str(fl["error"]))
+    if fl["paused"]:
+        print("WARNING: the outbox is PAUSED; %d note(s) queued, none sent" % stats["queued"],
+              file=sys.stderr)
+    if fl["busy"]:
+        print("WARNING: another flush holds the outbox lock; the queued notes go with it "
+              "or on the next 5 minute outbox run", file=sys.stderr)
+    if fl["deferred"]:
+        print("WARNING: %d note(s) deferred by the record; they stay queued" % fl["deferred"],
+              file=sys.stderr)
+    for line in problems:
+        print("deliverables-sweep PROBLEM:", line, file=sys.stderr)
+
+    print("deliverables-sweep: files_seen=%d written=%d queued=%d skipped=%d refused=%d "
+          "errors=%d skipped_optout=%d moved=%s flush_sent=%d flush_refused=%d flush_left=%d "
+          "import_found=%d import_inserted=%d import_updated=%d" % (
+              stats["seen"], stats["written"], stats["queued"], stats["skipped"],
+              stats["refused"] + fl["refused"], stats["errors"], stats["skipped_optout"],
+              str(stats["moved"]).lower(), fl["sent"], fl["refused"], fl["left"],
+              stats["import"].get("found", 0), stats["import"].get("inserted", 0),
+              stats["import"].get("updated", 0)))
+    if problems and os.path.isfile(FAILTASK) and not REHEARSAL:
+        subprocess.run([FAILTASK, "outbound", "deliverables sweep had refused or failed notes",
+                         "--detail", "; ".join(problems)[:500]], check=False)
+    return 0 if not problems else 1
 
 
 if __name__ == "__main__":
