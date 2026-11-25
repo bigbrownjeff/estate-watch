@@ -157,6 +157,19 @@ jobs:
           # public"): Access is the control, and an open gate on this host must read
           # DOWN like the others.
           check_url "gated:clearshift-locum" "https://clearshift-locum-9f3a72.pages.dev/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          # Added 2026-11-25: a sweep of the link registry found these live hosts
+          # watched by nothing outside the Mac. Public ones carry a body marker;
+          # gated ones must terminate on the Access host, so an open gate reads DOWN.
+          check_url "lantern-alpha"        "https://alpha.lantern.family/" public "" "Lantern"
+          check_url "lantern-site"         "https://lantern.family/" public "" "Control what your child watches"
+          check_url "mlb-forecast"         "https://mlb.jeffpinto.com/" public "" "MLB Hits Forecast"
+          check_url "character-sheets"     "https://character-sheet.jeffpinto.com/" public "" "Character Sheets"
+          check_url "gated:outbound"       "https://outbound.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          check_url "gated:personas"       "https://personas.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          check_url "gated:puppy"          "https://puppy.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          check_url "gated:photos"         "https://photos.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          check_url "gated:lab"            "https://lab.jeffpinto.com/" gated "cold-waterfall-c527.cloudflareaccess.com"
+          check_url "gated:lantern-tuning" "https://tuning.lantern.family/" gated "cold-waterfall-c527.cloudflareaccess.com"
           # Laptop heartbeat (dead-man's-switch): gist timestamp fresh?
           hb=$(curl -s -m 20 "$HEARTBEAT_RAW" | head -1 | tr -d '[:space:]')
           if [ -z "$hb" ]; then
