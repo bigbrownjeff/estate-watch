@@ -42,7 +42,8 @@ def load_sweep(rehearsal=False):
     environment is set before the load and restored after it."""
     global _loads
     _loads += 1
-    with mock.patch.dict(os.environ):
+    # no .pyc: a stale one (same size, same second) would hide an edit to the script
+    with mock.patch.dict(os.environ), mock.patch.object(sys, "dont_write_bytecode", True):
         if rehearsal:
             os.environ["NV_REHEARSAL"] = "1"
         else:
