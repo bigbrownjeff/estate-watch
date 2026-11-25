@@ -46,8 +46,9 @@ it passes routed=True to require_apply_authority, and notes_vault.logger.add_not
 hands each note to the outbox and returns a dict with queued=True (no note id yet,
 no local file). Per run:
   - a note whose title+tags+body hash equals the last hash known on the record
-    (the outbox's SENT-HASHES.json, or the replica file, whichever is newer) is
-    SKIPPED before add_note, so an unchanged note is never queued again;
+    (the outbox's SENT-HASHES.json, or the replica file, whichever is newer) or the
+    hash of an item of it still waiting in the outbox's pending/ is SKIPPED before
+    add_note, so an unchanged note is never queued again, sent or not yet sent;
   - every other note is counted from add_note's return dict: queued (moved vault)
     or written (local vault);
   - a refused write (secret scan, bad item) is counted as refused, printed to
@@ -261,13 +262,47 @@ def build_body(path, repo, sha, size, is_text):
     return excerpt + footer
 
 
-def _known_hash(vault_moved, outbox, logger, parse_frontmatter, data_dir, log_dir, note_id):
+def _pending_hashes(outbox):
+    """{note_id: content hash} of the sweep notes queued in the outbox and not yet
+    sent. Newest item per note wins; a pending append voids the note's entry (its
+    content on the record is no longer the replace's). Read-only, and an item that
+    cannot be read is ignored (flush will refuse it; the sweep must not die on it)."""
+    root = outbox.outbox_root()
+    rows = []
+    for ev in outbox._list_ids(root, "pending"):
+        d = os.path.join(root, "pending", ev)
+        try:
+            item = outbox.items.read_item(d)
+            if item.get("source_app") != SOURCE_APP:
+                continue
+            origin = item["origin"]
+            rows.append((origin["host"], origin["seq"], item, d))
+        except (outbox.items.FramingError, KeyError, TypeError, ValueError, OSError):
+            continue
+    rows.sort(key=lambda r: (r[0], r[1]))
+    hashes = {}
+    for _host, _seq, item, d in rows:
+        if item.get("op") == "append":
+            hashes.pop(item["source_id"], None)
+            continue
+        try:
+            hashes[item["source_id"]] = outbox._item_hash(item, d)
+        except (KeyError, OSError):
+            continue
+    return hashes
+
+
+def _known_hash(vault_moved, outbox, logger, parse_frontmatter, data_dir, log_dir, note_id,
+                pending=None):
     """The content hash of the note as last known to the record, or None.
 
-    Moved vault: the newer of the outbox's SENT-HASHES entry and the replica file
-    (outbox._base_hash, the same value the outbox stamps as base_hash on a replace).
+    Moved vault: a note already queued in the outbox (pending, newest), else the newer
+    of the outbox's SENT-HASHES entry and the replica file (outbox._base_hash, the same
+    value the outbox stamps as base_hash on a replace).
     Local vault: the note file already in log_dir."""
     if vault_moved:
+        if pending and note_id in pending:
+            return pending[note_id]
         return outbox._base_hash(outbox.outbox_root(), data_dir,
                                  outbox._norm_log_dir(log_dir, SOURCE_APP),
                                  SOURCE_APP, note_id)
@@ -308,6 +343,7 @@ def run_sweep(projects_root=PROJECTS_ROOT_DEFAULT, vault_repo=VAULT_REPO, dry_ru
         return {"found": 0, "inserted": 0, "updated": 0, "attachments": 0,
                 "missing_attachments": 0, "parse_errors": [], "parse_error_count": 0}
 
+    pending = _pending_hashes(outbox) if (vault_moved and not dry_run) else {}
     conn = None
     if not dry_run:
         if vault_moved:
@@ -348,8 +384,8 @@ def run_sweep(projects_root=PROJECTS_ROOT_DEFAULT, vault_repo=VAULT_REPO, dry_ru
                     written += 1
                     continue
                 if _known_hash(vault_moved, outbox, logger, parse_frontmatter, data_dir,
-                               log_dir, note_id) == logger._content_hash(title, tags, body):
-                    skipped += 1  # unchanged since the record last took it
+                               log_dir, note_id, pending) == logger._content_hash(title, tags, body):
+                    skipped += 1  # unchanged since the record last took it, or already queued
                     continue
                 result = logger.add_note(
                     conn, title=title, body=body, tags=tags, source="claude.sweep",
