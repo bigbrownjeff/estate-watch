@@ -60,13 +60,28 @@ def covered(b, corpus):
     best = max(corpus, key=lambda c: len(wb & c[1]) / max(len(wb), 1))
     return best[0] if len(wb & best[1]) / len(wb) >= 0.5 else None
 
+CLOUD_URL = "https://notes.jeffpinto.com"
+
+def note_url(log_stdout, note_id):
+    """The address of the logged note from `log`'s stdout: #id=N when the record
+    applied it (`logged note #N`), else the #sid= address of a queued write."""
+    m = re.search(r"note #(\d+)", log_stdout)
+    if m:
+        return "%s/#id=%s" % (CLOUD_URL, m.group(1))
+    m = re.search(r"^\s*address:\s+(\S+)", log_stdout, re.M)
+    if m:
+        return m.group(1)
+    if "QUEUED" in log_stdout:
+        return "%s/#sid=log/%s" % (CLOUD_URL, note_id)
+    raise RuntimeError("notes_vault log printed neither 'note #N' nor QUEUED: " + log_stdout[:200])
+
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--write", action="store_true"); ap.add_argument("--card", action="store_true")
     a = ap.parse_args()
     if not os.path.isdir(SRC):
         print("codex-memory-import: no ~/.codex/memories on this machine; nothing to do"); return 0
     seen = set(open(SEEN).read().split("\n")) if os.path.exists(SEEN) else set()
-    corpus = existing(); new = []; skipped = 0
+    corpus = existing(); new = []; skipped = 0; rc = 0
     for section, b in bullets():
         key = re.sub(r"\s+", " ", b)[:200]
         if key in seen: continue
@@ -88,37 +103,30 @@ def main():
             for s, b in new: h.write(re.sub(r"\s+", " ", b)[:200] + "\n")
         print("wrote", path)
         # Jeff reads on his phone: the vault note is the deliverable, the file is the receipt
-        # (memory reports-go-to-vault-notes). Best effort; the vault is local to this Mac.
+        # (memory reports-go-to-vault-notes). Since 2026-11-23 the vault of record is the
+        # cloud machine: `log` either prints "logged note #N" (the record applied it) or
+        # QUEUED with a #sid= address (the outbox sends it within 5 minutes). Never read
+        # the local notes.db for the id: the replica trails the record by up to 75 minutes.
         vault_url = ""
         vault = os.path.join(H, "Projects", "notes-vault")
         if os.path.isdir(vault):
             note_id = "codex-memory-candidates-" + today
             try:
                 with open(path) as body:
-                    subprocess.run([sys.executable, "-m", "notes_vault", "log", "--title",
-                                    "Codex memory import candidates (%s): %d to keep or skip" % (today, len(new)),
-                                    "--tag", "infra", "--tag", "memory", "--tag", "review",
-                                    "--source", "launchd", "--id", note_id],
-                                   cwd=vault, stdin=body, check=True, capture_output=True, text=True)
-                import sqlite3
-                # NOT `file:...?mode=ro`: a read-only handle cannot create the
-                # -shm a WAL reader needs, so that form raises "unable to open
-                # database file" on exactly the runs that follow a clean writer
-                # close (memory sqlite-mode-ro-wal-side-files; it killed the
-                # 2026-09-08 07:05 morning-digest). query_only refuses writes
-                # and still lets the handle make its side files.
-                c = sqlite3.connect(os.path.join(vault, "data", "notes.db"), timeout=30)
-                c.execute("PRAGMA busy_timeout=30000")
-                c.execute("PRAGMA query_only=1")
-                row = c.execute("select id from notes where source_id = ?", (note_id,)).fetchone()
-                if row:
-                    vault_url = "https://notes.jeffpinto.com/#id=%d" % row[0]
-                    print("vault note", vault_url)
+                    r = subprocess.run([sys.executable, "-m", "notes_vault", "log", "--title",
+                                        "Codex memory import candidates (%s): %d to keep or skip" % (today, len(new)),
+                                        "--tag", "infra", "--tag", "memory", "--tag", "review",
+                                        "--source", "launchd", "--id", note_id],
+                                       cwd=vault, stdin=body, check=True, capture_output=True, text=True)
+                vault_url = note_url(r.stdout, note_id)
+                print("vault note", vault_url)
             except Exception as exc:  # noqa: BLE001
-                print("vault log failed (file still written):", exc, file=sys.stderr)
+                print("vault log FAILED (file still written):", exc,
+                      getattr(exc, "stderr", "") or "", file=sys.stderr)
+                rc = 1
         if a.card and os.path.exists(FAILTASK):
             subprocess.run([FAILTASK, "infra", "Codex memory import: %d candidate(s) to review (%s)" % (len(new), today), "--detail", "Read: " + (vault_url or path) + " ; keep = write the memory in the shared tree; skip = leave. Source last regenerated " + stamp + ".", "--dedupe-key", "codex-memory-import-" + today, "--severity", "warn"], check=False)
-    return 0
+    return rc
 
 if __name__ == "__main__":
     sys.exit(main())
